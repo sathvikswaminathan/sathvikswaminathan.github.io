@@ -19,4 +19,4 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ---
 
-If you'd like to get in touch, you can reach me at sathvikswaminathan@gmail.com or connect with me on [LinkedIn](https://www.linkedin.com/in/sathvik-swaminathan-50b424178/).
+If you'd like to get in touch, you can reach me at [mail](sathvikswaminathan@gmail.com) or connect with me on [LinkedIn](https://www.linkedin.com/in/sathvik-swaminathan-50b424178/).
