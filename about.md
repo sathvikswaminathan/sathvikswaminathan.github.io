@@ -1,29 +1,18 @@
 ---
 layout: page
 title: About
+permalink: /about/
+nav_order: 2
 ---
 
-<p class="message">
-  Hey there! This page is included as an example. Feel free to customize it for your own use upon downloading. Carry on!
-</p>
+![My Picture](/images/myself.jpg){: style="max-width: 200px; border-radius: 50%; margin-bottom: 20px;" }
 
-In the novel, *The Strange Case of Dr. Jeykll and Mr. Hyde*, Mr. Poole is Dr. Jekyll's virtuous and loyal butler. Similarly, Poole is an upstanding and effective butler that helps you build Jekyll themes. It's made by [@mdo](https://twitter.com/mdo).
+Hello! I'm a research scientist at Intel Labs specializing in cutting-edge technologies and innovation.
 
-There are currently two themes built on Poole:
+My research focuses on [briefly mention your research areas or interests]. Outside of work, I enjoy pursuing hobbies like [mention your hobbies briefly].
 
-* [Hyde](http://hyde.getpoole.com)
-* [Lanyon](http://lanyon.getpoole.com)
+Feel free to explore my site to learn more about my projects and interests.
 
-Learn more and contribute on [GitHub](https://github.com/poole).
+---
 
-## Setup
-
-Some fun facts about the setup of this project include:
-
-* Built for [Jekyll](https://jekyllrb.com)
-* Developed on GitHub and hosted for free on [GitHub Pages](https://pages.github.com)
-* Coded with [Atom](https://atom.io)
-
-Have questions or suggestions? Feel free to [open an issue on GitHub](https://github.com/poole/issues/new) or [ask me on Twitter](https://twitter.com/mdo).
-
-Thanks for reading!
+If you'd like to get in touch, you can reach me at [your email] or connect with me on [your preferred social media, e.g., LinkedIn](https://www.linkedin.com/in/yourprofile).
