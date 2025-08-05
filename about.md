@@ -7,7 +7,7 @@ nav_order: 1
 
 <!-- Center the image using HTML with inline CSS -->
 <div style="text-align: center; margin-bottom: 20px;">
-  <img src="/images/myself.jpg" alt="My Picture" style="max-width: 200px; border-radius: 50%;">
+  <img src="assets/images/myself.jpg" alt="My Picture" style="max-width: 200px; border-radius: 50%;">
 </div>
 
 Hello! I'm a Research Scientist at Intel Labs specializing in designing efficient computer systems.
