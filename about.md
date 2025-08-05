@@ -16,12 +16,12 @@ My research focuses on workload analysis, performance engineering, and improving
 
 Feel free to explore my [technical musings](/) to learn more about my interests.
 
-<div style="text-align: center; margin-top: 30px;">
+<div style="display: flex; justify-content: center; gap: 15px; margin-top: 30px;">
   <a href="https://scholar.google.com/citations?user=AoOX4xwAAAAJ&hl=en" target="_blank" rel="noopener">
-    <img src="{{ '/assets/images/google-scholar-logo.png' | relative_url }}" alt="Google Scholar" style="width: 40px; height: 40px; margin-right: 15px; vertical-align: middle;">
+    <img src="{{ '/assets/images/google-scholar-logo.png' | relative_url }}" alt="Google Scholar" style="width: 40px; height: 40px;">
   </a>
   <a href="https://www.linkedin.com/in/sathvik-swaminathan-50b424178/" target="_blank" rel="noopener">
-    <img src="{{ '/assets/images/linkedin-logo.png' | relative_url }}" alt="LinkedIn" style="width: 40px; height: 40px; vertical-align: middle;">
+    <img src="{{ '/assets/images/linkedin-logo.png' | relative_url }}" alt="LinkedIn" style="width: 40px; height: 40px;">
   </a>
 </div>
 
