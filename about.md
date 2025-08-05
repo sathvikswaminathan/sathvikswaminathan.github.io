@@ -12,7 +12,7 @@ nav_order: 1
 
 Hello! I'm a Research Scientist at Intel Labs specializing in designing efficient computer systems.
 
-My research focuses on workload analysis, performance engineering, and improving memory management for key workloads such as DNN training, LLM Inference, etc.You'll either find me analyzing cache-miss rates or lying in agony at the gym after failing a PR."
+My research focuses on workload analysis, performance engineering, and improving memory management for key workloads such as DNN training, LLM Inference, etc. You'll either find me analyzing cache-miss rates or lying in agony at the gym after failing a PR.
 
 Feel free to explore my [technical musings](/) to learn more about my interests. 
 
