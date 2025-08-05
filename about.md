@@ -2,7 +2,7 @@
 layout: page
 title: About
 permalink: /about/
-nav_order: 2
+nav_order: 1
 ---
 
 ![My Picture](/images/myself.jpg){: style="max-width: 200px; border-radius: 50%; margin-bottom: 20px;" }
