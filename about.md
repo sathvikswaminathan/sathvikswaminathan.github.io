@@ -27,4 +27,47 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ---
 
+## Publications
+
+[Sathvik Swaminathan](https://scholar.google.com/citations?user=AoOX4xwAAAAJ&hl=en), [Sandeep Kumar](#), [Aravinda Prasad](#), [Sreenivas Subramoney](#). [**TierTrain: Proactive Memory Tiering for CPU-Based DNN Training**](https://dl.acm.org/doi/pdf/10.1145/3735950.3735956). Proceedings of the ACM SIGPLAN International Symposium on Memory Management (ISMM), 2025.
+
+
+
+---
+
+## Patents
+
+- **US Patent:** *Context-Aware Memory Tiering for Machine Learning Training*
+
+---
+
+## Work Experience
+
+- **Research Scientist**  
+  Processor Architecture Research Lab, Intel Labs  
+  Bengaluru, Karnataka, India  
+  July 2024 - Present
+
+- **Architecture Research Intern**  
+  Processor Architecture Research Lab, Intel Labs  
+  Bengaluru, Karnataka, India  
+  Aug 2023 – June 2024
+
+- **Hardware Intern**  
+  NVIDIA  
+  Bengaluru, Karnataka, India  
+  May 2023 – Jul 2023   
+
+- **Architecture Research Intern**  
+  Processor Architecture Research Lab, Intel Labs  
+  Remote  
+  Feb 2023 – Apr 2024 
+
+- **Digital Design Intern**  
+  AB Circuits and Research Labs (ABCRL), India  
+  Remote  
+  Feb 2022 – Jul 2022  
+
+---
+
 If you'd like to get in touch, you can reach me at [mail](mailto:sathvikswaminathan@gmail.com).
