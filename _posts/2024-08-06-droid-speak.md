@@ -1,4 +1,4 @@
 ---
 layout: post
-title: "Paer Review: DroidSpeak" 
+title: "Paper Review: DroidSpeak" 
 ---
