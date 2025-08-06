@@ -37,7 +37,7 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ## Patents
 
-- **US Patent:** *Context-Aware Memory Tiering for Machine Learning Training*
+**US Patent:** *Context-Aware Memory Tiering for Machine Learning Training*
 
 ---
 
