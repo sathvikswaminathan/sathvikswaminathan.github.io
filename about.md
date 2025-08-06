@@ -29,7 +29,7 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ## Publications
 
-[Sathvik Swaminathan](https://scholar.google.com/citations?user=AoOX4xwAAAAJ&hl=en), [Sandeep Kumar](#), [Aravinda Prasad](#), [Sreenivas Subramoney](#). [**TierTrain: Proactive Memory Tiering for CPU-Based DNN Training**](https://dl.acm.org/doi/pdf/10.1145/3735950.3735956). Proceedings of the ACM SIGPLAN International Symposium on Memory Management (ISMM), 2025.
+**Sathvik Swaminathan**, Sandeep Kumar, Aravinda Prasad, Sreenivas Subramoney. [**TierTrain: Proactive Memory Tiering for CPU-Based DNN Training**](https://dl.acm.org/doi/pdf/10.1145/3735950.3735956). Proceedings of the ACM SIGPLAN International Symposium on Memory Management (ISMM), 2025.
 
 
 
