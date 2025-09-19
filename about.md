@@ -37,6 +37,7 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ## Patents
 
+**US Patent:** *Bandwidth Aware Proactive Memory Tiering for LLM Inference*
 **US Patent:** *Context-Aware Memory Tiering for Machine Learning Training*
 
 ---
