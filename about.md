@@ -71,4 +71,11 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 
 ---
 
+## Education
+
+**B.E. Electronics and Communication Engineering; M.Sc. Physics**
+Birla Institute of Technology and Science, Pilani
+2019-2024 
+
+---
 If you'd like to get in touch, you can reach me at [mail](mailto:sathvikswaminathan@gmail.com).
