@@ -42,7 +42,7 @@ I used the Intel MLC tool to compute the maximum bandwidth across each of these 
 
 As expected, with the cores on the same socket, the bandwidth to HBM is much higher than that of DRAM. However the bandwidth between remote DRAM and HBM nodes take a significant hit because inter-socket communciation on SPR systems is handled by the Intel Ultra Path Interconnect (UPI) protocol which offers only 64 GB/sec in each direction, making it the bottleneck in inter-socket communications. For this reason, inter socket communications are generally discouraged for bandwidth-sensitive applications. 
 
-The numbers presented above are when the CPU keeps bombarding memory requests with minimal delay between each to keep saturating the memory subsystem and extract the maximum bandwidth possible. However, real workloads often fetch data, process the data and then issue a memory request to fetch data for the next computation. What would the memory bandwidth look like when there is a longer delay between these requests?
+The numbers presented above are when the CPU keeps bombarding memory requests with minimal delay between each to keep saturating the memory subsystem and extract the maximum bandwidth possible. However, real workloads often fetch data, process the data, and then issue a memory request to fetch data for the next computation. What would the memory bandwidth look like when there is a longer delay between these requests?
 
 <figure>
   <img src="/assets/images/local_hbm_dram_bandwidth_vs_delay.png">
