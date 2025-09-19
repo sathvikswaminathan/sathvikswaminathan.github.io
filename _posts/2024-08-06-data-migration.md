@@ -60,5 +60,32 @@ $$
 \min \left( \text{Peak Bandwidth}_{\text{HBM}}, \ \text{Peak Bandwidth}_{\text{DRAM}} \right)
 $$
 
+This would be around $$200 GB/sec$$ on my system.
 
+Let's look at how `memcpy` performs on this system
 
+<figure>
+  <img src="/assets/images/memcpy_bw_plot.png">
+</figure>
+
+The above plot illustrates the migration bandwidth acheived when `memcpy` tries to move data from DRAM to HBM for different data sizes split across different number of cores in parallel. As the data size grows, it makes sense to parallelize the `memcpy` call across cores to saturate the memory bandwidth. Of course, using all the cores to just perform data migration does not make sense as it results in a high tax. 
+
+<figure>
+  <img src="/assets/images/dsa_bw_plot.png">
+</figure>
+
+This is where Intel DSA enters the picture. 
+
+The CPU cores simply submit job descriptors to Intel DSA to migrate data between two different memory locations and DSA handles the rest. DSA is also equipped with better interconnects to migrate data, resulting in higher memory migration bandwidth while freeing up the CPU to run the actual workload.
+
+However, simply copying the data is not enough. When data gets copied from DRAM to HBM, the `memcpy` or the DSA copy call assigns a new buffer in the destination, resulting in a new virtual address. The application can either be modified to access the new virtual address or the kernel can take it upon itself to swap the virtual pointer to point to the new physical pages in HBM. This is exactly what the system call `move_pages` does. `move_pages` internally uses `memcpy` to copy data, but ongoing work aims to enable it to utilize DSA.
+
+<figure>
+  <img src="/assets/images/move_pages_bw.png">
+</figure>
+
+As shown, the migration bandwidth achieved by `move_pages` is much lower than the copy calls, as it performs additional steps of swapping pointers, performing TLB shootdowns to invalidate stale TLB mappings, etc. 
+
+It boils down to a tradeoff of either manually changing the application code to access a new virtual address after every migration or having the convenience to use a generic migration call with a performance penalty.
+
+In the era of LLM inference, where every layer of the transformer model executes in less than a millisecond, efficient data migration is the need of the hour.
