@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "Data Migration"
+title: "Memory Bandwidth & Migration Performance"
 ---
 
 In today's rapidly evolving landscape of system architecture for efficient AI / LLM inference and the growing adoption of CXL-attached memory devices, high-performant data migration is in more demand than ever. The rapid growth of LLMs is atrributed to using larger weights and longer context windows, which have led to signficiant memory bandwidth and capacity demands. CPUs, GPUs, and accelerators have limited on chip high bandwidth memory and data migration helps offer the illusion of a much larger high bandwidth memory capacity to the application. So much so, that NVIDIA invested in NVLink, a high-speed interconnect, to migrate data between NVIDIA GPUs and CPUs, and Intel invested in the Data Streaming Accelerator, DSA, a data migration accelerator amongst other things. 
@@ -27,7 +27,7 @@ Below are a few scenarios where performance of data migration becomes critical:
 
 The overarching goal of data migration is to ensure data is available in the appropriate memory module in time, preventing compute resources from idling while waiting for the data.
 
-In this post, I will review the data migration performance on the Intel Sapphire Rapids (SPR) architecture, because that is the only system I have access to. 
+In this post, I will review memory bandwidth and data migration performance on the Intel Sapphire Rapids (SPR) architecture, because that is the only system I have access to. 
 
 The SPR system is a dual-socket system, with each socket supporting 56 physical cores, 64 GB on-chip High Bandwidth Memory and 1 TB of DDR DRAM.
 <figure>
