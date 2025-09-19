@@ -29,7 +29,7 @@ The overarching goal of data migration is to ensure data is available in the app
 
 In this post, I will review memory bandwidth and data migration performance on the Intel Sapphire Rapids (SPR) architecture, because that is the only system I have access to. 
 
-The SPR system is a dual-socket system, with each socket supporting 56 physical cores, 64 GB on-chip High Bandwidth Memory and 1 TB of DDR DRAM. Overall, the system is also quipped with 8 DSAs.
+The SPR system is a dual-socket system, with each socket supporting 56 physical cores, 64 GB on-chip High Bandwidth Memory and 1 TB of DDR DRAM. Overall, the system is also equipped with 8 DSAs.
 <figure>
   <img src="/assets/images/SPR%20architecture.png" alt="SPR architecture">
 </figure>
