@@ -45,12 +45,12 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 ## Work Experience
 
 - **Research Scientist**  
-  Processor Architecture Research Lab, Intel Labs  
+  Intel Labs  
   Bengaluru, Karnataka, India  
   July 2024 - Present
 
-- **Architecture Research Intern**  
-  Processor Architecture Research Lab, Intel Labs  
+- **Research Intern**  
+  Intel Labs  
   Bengaluru, Karnataka, India  
   Aug 2023 – June 2024
 
@@ -59,8 +59,8 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
   Bengaluru, Karnataka, India  
   May 2023 – Jul 2023   
 
-- **Architecture Research Intern**  
-  Processor Architecture Research Lab, Intel Labs  
+- **Research Intern**  
+  Intel Labs  
   Remote  
   Feb 2023 – Apr 2024 
 
