@@ -48,7 +48,7 @@ The numbers presented above are when the CPU keeps bombarding memory requests wi
   <img src="/assets/images/local_hbm_dram_bandwidth_vs_delay.png">
 </figure>
 
-The memory bandwidth goes down with increasing delay between each request. The memory bandwidth that can be extracted by a workload does not just depend on the memory subsystem but also the access pattern of the workload and the available compute power to compute the workload's operations. For example, the LLAMA-3.1 8B model with a batch size of 2 and a context length of 8K running on all 56 cores in a single socket, could only extract a peak bandwidth of 306 GB/sec from the local HBM.
+The memory bandwidth goes down with increasing delay between each request. The memory bandwidth that can be extracted by a workload does not just depend on the memory subsystem, but also the access pattern of the workload, and the available compute power to compute the workload's operations. For example, the LLAMA-3.1 8B model with a batch size of 2 and a context length of 8K running on all 56 cores in a single socket, could only extract a peak bandwidth of 306 GB/sec from the local HBM.
 
 In tiered memory systems like SPR, it becomes crucial to migrate data from the slow tier (DRAM) to the fast tier (HBM) to ensure that DRAM simply acts as a capacity tier and most of the memory requests are serviced by HBM, allowing bandwidth-sensitive applications like LLM inference workloads to achieve the best performance possible. 
 
