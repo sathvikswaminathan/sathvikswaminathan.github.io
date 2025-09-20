@@ -50,7 +50,7 @@ The paper, [DroidSpeak: KV Cache Sharing for Cross-LLM Communication and Multi-L
   <img src="/assets/images/critical layers F1.png" style="width: 100%;">
 </figure>
 
-The accuracy drop is only sensitive to a few specific layers that reuse the KV cache and stays minimal for the reamining layers. These layers are referred to as *critical layers* in the paper, accounting only for $11\%$ of the total layers. While the critical layers for every dataset, the authors have shown that the variance in accuracy score only varies for the critical layers while remaining roughly the same across non-critical layers across datasets.
+The accuracy drop is only sensitive to a few specific layers that reuse the KV cache and stays minimal for the reamining layers. These layers are referred to as *critical layers* in the paper, accounting only for $11\%$ of the total layers. While the critical layers need to be identified for every dataset, the authors have shown that the variance in accuracy score only varies for the critical layers while remaining roughly the same across non-critical layers across datasets.
 
 
 ### Recomputing KV cache for critical layers
