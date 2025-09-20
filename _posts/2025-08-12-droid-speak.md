@@ -73,4 +73,4 @@ As an additional optimization, the embedidng vectors for the critical layer is s
   <img src="/assets/images/droidspeak_results.png" style="width: 100%;">
 </figure>
 
-The above results are for models based on the `mistral` architecture. DroidSpeak achieves nearly the same accuracy as full prefill computation, while also reducing time to first token (TTFT).
+The above results are for models based on the `mistral` architecture. DroidSpeak achieves nearly the same accuracy as full prefill computation, while also reducing the TTFT.
