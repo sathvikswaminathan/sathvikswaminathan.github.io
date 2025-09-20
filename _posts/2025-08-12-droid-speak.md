@@ -57,7 +57,7 @@ The accuracy drop is only sensitive to a few specific layers that reuse the KV c
 
 While it is easy enough to reuse the KV cache for non-critical layers, recomputing the KV cache for critical layers remains challenging since the intiial embedding vector for the critical layer needs to be computed from prior layers to compute the KV for the critical layer, which defeats the whole purpose of prefix caching.
 
-The authors propose using the embedding vector for the critical layers from the sender model. Even this introduces an accuracy loss since the embedding vector is computed by the sender model. This problem gets worse if there are non-contigous critical layers, as multiple embedding vectors need to be sent by the sender model. To get around this, the authors pick *all* the layers between critical layers and recompute the KV cache. 
+The authors propose using the embedding vector for the critical layers from the sender model. Even this introduces an accuracy loss since the embedding vector is computed by the sender model. This problem gets worse if there are non-contiguous critical layers, as multiple embedding vectors need to be sent by the sender model. To get around this, the authors pick *all* the layers between critical layers and recompute the KV cache. 
 
 For example, if the critical layers have been identified as layers 16–18, 20, and 25–27, as opposed to transmitting the embedding vector for layers 16, 20, and 25, only the embedding vector for layer 16 is used and the KV cache is recomputed for layers 16-27.
 
