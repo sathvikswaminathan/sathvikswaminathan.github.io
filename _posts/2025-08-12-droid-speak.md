@@ -1,11 +1,11 @@
 ---
 layout: post
-title: "Prefix sharing in LLM Agents (DroidSpeak)" 
+title: "Prefix sharing in LLM agents (DroidSpeak)" 
 ---
 
 *All the figures in this post have been used from the DroidSpeak paper
 
-LLM Agents are all the buzz these days. 
+LLM agents are all the buzz these days. 
 
 LLM agents orchestrate multiple LLMs, each fine-tuned on different datasets to serve distinct tasks and collaborate on solving complex use cases. These models generally share the same foundational architecture (ex: LLAMA-3.1 8B), although system designs that allow different LLMs to originate from different foundational models are not uncommon.
 
