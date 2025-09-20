@@ -31,7 +31,7 @@ During the prefill phase of one request, the whole input prompt is processed in 
 
 ## Prefix Sharing in LLM Agents
 
-LLM Agents deploy a bunch of fine-tuned LLMs on a cluster of GPU nodes. As a result of fine-tuning, these LLMs hold completely different weights, making prefix sharing challenging. As a concrete example, imagine a `llama-3.1-8b-instruct` model sharing the prefix context with a `llama-3.1-storm-8b` model. The prefix context would *not* be processed by the `llama-3.1-storm-8b` model the same way as if it were recomputed, as the prefill phase would have generated a completely different representation.
+LLM Agents deploy a bunch of fine-tuned LLMs on a cluster of GPU nodes. As a result of fine-tuning, these LLMs hold completely different weights, making prefix sharing challenging. As an example, imagine a `llama-3.1-8b-instruct` model sharing the prefix context with a `llama-3.1-storm-8b` model. The prefix context would *not* be processed by the `llama-3.1-storm-8b` model the same way as if it were recomputed, as the prefill phase would have generated a completely different representation.
 
 
 <figure style="display: flex; justify-content: center; gap: 20px; align-items: center;">
