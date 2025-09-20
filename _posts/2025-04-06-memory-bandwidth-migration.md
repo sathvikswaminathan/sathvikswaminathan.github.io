@@ -20,7 +20,7 @@ In today's rapidly evolving landscape of system architecture for efficient AI Tr
 </figure> -->
 
 Below are a few scenarios where performance of data migration becomes critical:
-
+  
 - Tiered Memory Systems (HBM, CXL-attached memory)
 - CPU-GPU hybrid systems
 - GPU clusters

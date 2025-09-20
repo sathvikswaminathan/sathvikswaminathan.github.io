@@ -35,13 +35,42 @@ LLM Agents deploy a bunch of fine-tuned LLMs on a cluster of GPU nodes. As a res
 
 
 <figure style="display: flex; justify-content: center; gap: 20px; align-items: center;">
-  <img src="/assets/images/naive prefix sahring llm agents.png" style="width: 80%;">
+  <img src="/assets/images/naive prefix sahring llm agents.png" style="width: 100%;">
 </figure>
 
 
 The paper, [DroidSpeak: KV Cache Sharing for Cross-LLM Communication and Multi-LLM Serving](https://arxiv.org/abs/2411.02820), addresses this issue.
 
 
+## DroidSpeak
+
+ As shown in the above figure, naively using the whole KV cache results in a huge accuracy loss. The authors of the paper have studied the sensitivity of the accuracy loss to specific layers of reusing the KV and recomputing the KV cache for the rest of the layers. They show the accuracy comparison (F1 score) for `llama-3-8B-sft-lora-ultrachat` model reusing the KV cache from the `fingpt-llama-3-8B` model against no KV cache reuse at all.
+
+<figure style="display: flex; justify-content: center; gap: 20px; align-items: center;">
+  <img src="/assets/images/critical layers F1.png" style="width: 100%;">
+</figure>
+
+The accuracy drop is only sensitive to a few specific layers that reuse the KV cache and stays minimal for the reamining layers. These layers are referred to as *critical layers* in the paper, accounting only for $11%$ of the total layers. While the critical layers for every dataset, the authors have shown that the variance in accuracy score only varies for the critical layers while remaining roughly the same across non-critical layers across datasets.
 
 
+### Recomputing KV cache for critical layers
 
+While it is easy enough to reuse the KV cache for non-critical layers, recomputing the KV cache for critical layers remains challenging since the intiial embedding vector for the critical layer needs to be computed from prior layers to compute the KV for the critical layer, which defeats the whole purpose of prefix caching.
+
+The authors propose using the embedding vector for the critical layers from the sender model. Even this introduces an accuracy loss since the embedding vector is computed by the sender model. This problem gets worse if there are non-contigous critical layers, as multiple embedding vectors need to be sent by the sender model. To get around this, the authors pick *all* the layers between critical layers and recompute the KV cache. 
+
+For example, if the critical layers have been identified as layers 16–18, 20, and 25–27, as opposed to transmitting the embedding vector for layers 16, 20, and 25, only the embedding vector for layer 16 is used and the KV cache is recomputed for layers 16-27.
+
+
+<figure style="display: flex; justify-content: center; gap: 20px; align-items: center;">
+  <img src="/assets/images/contigous compute error.png" style="width: 70%;">
+</figure>
+
+As an additional optimization, the embedidng vectors for the critical layer is sent along with the KV cache for the non-critical layers in parallel to overlap recompute of the KV cache with the KV cache transfer, impoving the overall throughput.
+
+
+<figure style="display: flex; justify-content: center; gap: 20px; align-items: center;">
+  <img src="/assets/images/droidspeak_results.png" style="width: 100%;">
+</figure>
+
+The above results are for models based on the `mistral` architecture. DroidSpeak achieves nearly the same accuracy as full prefill computation, while also reducing time to first token (TTFT).
