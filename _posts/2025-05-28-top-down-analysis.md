@@ -2,6 +2,11 @@
 layout: post
 title: "Detect Performance Bottlenecks with Top-Down Analysis"
 ---
+Figures and metrics in this post are based on concepts from the paper:
+
+> Ahmad Yasin, "A Top-Down Method for Performance Analysis and Counters Architecture," *2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)*, 2014, pp. 35-44.  
+> [https://doi.org/10.1109/ISPASS.2014.6844459](https://doi.org/10.1109/ISPASS.2014.6844459)
+
 
 Top-Down Analysis is a methodology to identify performance bottlenecks. It starts by getting a 10,000-foot view of which subsystem the application spends the most time in. Throughout the application's lifetime, it spends time in one of the following subsystems:
 
