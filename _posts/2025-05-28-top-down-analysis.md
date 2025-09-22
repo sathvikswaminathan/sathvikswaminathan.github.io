@@ -2,7 +2,7 @@
 layout: post
 title: "Detect Performance Bottlenecks with Top-Down Analysis"
 ---
-Figures and metrics in this post are based on concepts from the paper:
+Figures in this post are based on concepts from the paper:
 
 > Ahmad Yasin, "A Top-Down Method for Performance Analysis and Counters Architecture," *2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)*, 2014, pp. 35-44.  
 > [https://doi.org/10.1109/ISPASS.2014.6844459](https://doi.org/10.1109/ISPASS.2014.6844459)
@@ -26,7 +26,11 @@ The Top-Down Analysis hierarchy is depicted below:
   <img src="/assets/images/tma-heir.png" alt="SPR architecture">
 </figure>
 
-Linux `perf` leverages hardware performance counters to facilitate the top-down analysis methodology.
+Linux `perf` leverages hardware performance counters to facilitate the top-down analysis methodology. It collects data from the relevant performance counters and calculates the top-down statistics using formulas like below.
+
+<figure>
+  <img src="/assets/images/tma_formulas.png">
+</figure>
 
 In this post, we will focus on identifying bottlenecks for a simple LLM inference application using the LLAMA-3.1 8B model with an input length of 512, output length of 256, and a batch size of 2 on an Intel SPR system.
 
