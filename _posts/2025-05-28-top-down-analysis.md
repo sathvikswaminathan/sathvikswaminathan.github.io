@@ -2,7 +2,7 @@
 layout: post
 title: "Detect Performance Bottlenecks with Top-Down Analysis"
 ---
-Figures in this post are based on concepts from the paper:
+Figures in this post are from the paper:
 
 > Ahmad Yasin, "A Top-Down Method for Performance Analysis and Counters Architecture," *2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)*, 2014, pp. 35-44.  
 > [https://doi.org/10.1109/ISPASS.2014.6844459](https://doi.org/10.1109/ISPASS.2014.6844459)
