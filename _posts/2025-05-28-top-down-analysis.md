@@ -167,5 +167,5 @@ The function `sgemm_t_n23_b0 ` from the `libmkl_avx512.so.2 ` library issues mos
 The `vmovups` instructions load data from memory into SIMD registers and consume a lot of time.
 
 
-Now that the performance bottleneck has been identified, differnet approaches can be experimented to lowering the loading time for the `vmovups` instructions such as using the `__builtin_prefetch` function to prefetch the relevant data into the cache.
+Now that the performance bottleneck has been identified, differnet approaches can be experimented to lowering the loading time for the `vmovups` instructions such as calling the `__builtin_prefetch` function at the appropriate time to prefetch the relevant data into the cache.
 
