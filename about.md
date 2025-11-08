@@ -32,12 +32,12 @@ Feel free to explore my [technical musings](/) to learn more about my interests.
 **Sathvik Swaminathan**, Sandeep Kumar, Aravinda Prasad, Sreenivas Subramoney. [**TierTrain: Proactive Memory Tiering for CPU-Based DNN Training**](https://dl.acm.org/doi/pdf/10.1145/3735950.3735956). Proceedings of the ACM SIGPLAN International Symposium on Memory Management (ISMM), 2025.
 
 
-
+**Sathvik Swaminathan**. [**Exploiting Page Faults for Covert Communication**](https://arxiv.org/abs/2509.20398). arXiv preprint.
 ---
 
 ## Patents
 
-**US Patent:** *Bandwidth Aware Proactive Memory Tiering for LLM Inference*  
+**US Patent:** *Proactive Bandwidth-Aware Memory Tiering for Efficient LLM Inference*  
 **US Patent:** *Context-Aware Memory Tiering for Machine Learning Training*
 
 ---
