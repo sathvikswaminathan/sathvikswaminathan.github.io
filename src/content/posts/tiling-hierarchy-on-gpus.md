@@ -26,12 +26,24 @@ Every SM is divided into 4 subpartitions known as SMSPs. Each SMSP has a warp sc
 Each FP32 CUDA core can execute instructions like the FMA (fused multiply-add):
 
 ```text
-d = a * b + c
+c = a * b + c
 ```
 
 Essentially every FMA results in `2 FLOPs` -- one multiplication and one addition. The CUDA cores are pipelined, allowing every SMSP to perform `2 FLOPs` per cycle per core, resulting in a peak throughput of `2 FLOPs x 32 = 64 FLOPs` per cycle. The whole SM can support a peak throughput of `4 x 64 FLOPs = 256 FLOPs` or `128 FMAs` per cycle.
 
 ## Arithmetic Intensity of FMAs
+
+In the FMA operation `c = a * b + c`, the accumualator `c` is already present in the register file. The threads will have to load `a`, `b` into the reg file to execute the FMA. 
+
+Arithmetic intensity (AI) is the ratio of computation performed to data moved from memory.
+
+$$
+\text{Arithmetic Intensity} = \frac{\text{Number of arithmetic operations}}{\text{Bytes transferred from memory}}
+$$
+
+For a single FMA, the AI is `2 FLOPs / 64 bytes` = `0.03125 FLOPs per byte` or 2 loads per FMA.
+
+Across multiple FMAs, the effective AI would depend on 
 
 ## The problem is a ratio
 
