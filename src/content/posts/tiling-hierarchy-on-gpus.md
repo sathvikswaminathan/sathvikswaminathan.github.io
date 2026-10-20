@@ -37,7 +37,9 @@ In the FMA operation `c = a * b + c`, the accumualator `c` is already present in
 
 Arithmetic intensity (AI) is the ratio of computation performed to data moved from memory.
 
+$$
 \text{Arithmetic Intensity} = \frac{\text{Number of arithmetic operations}}{\text{Bytes transferred from memory}}
+$$
 
 For a single FMA, the AI is `2 FLOPs / 64 bytes` = `0.03125 FLOPs per byte` or 2 loads per FMA.
 
