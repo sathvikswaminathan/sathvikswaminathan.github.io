@@ -8,7 +8,7 @@ tags:
   - performance
   - memory-hierarchy
   - gemm
-description: Why fast GPU kernels tile at three levels instead of one, and how each tier of the hierarchy multiplies arithmetic intensity.
+description: GPUs are equipped with tremedous amount of compute and a tiered memory architecture. How data is placed and accessed across these tiers determines how much of that compute is being used. 
 ---
 
 Write a matrix multiply the obvious way and it will be correct, it will issue exactly the right number of floating-point operations, and it will run roughly an order of magnitude below what the hardware can do. Nothing is wrong with the arithmetic. The problem is that the kernel spends almost all of its time waiting for operands to arrive.
