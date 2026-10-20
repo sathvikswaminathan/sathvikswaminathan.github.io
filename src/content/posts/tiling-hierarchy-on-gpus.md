@@ -33,13 +33,11 @@ Essentially every FMA results in `2 FLOPs` -- one multiplication and one additio
 
 ## Arithmetic Intensity of FMAs
 
-In the FMA operation `c = a * b + c`, the accumualator `c` is already present in the register file. The threads will have to load `a`, `b` into the reg file to execute the FMA. 
+In the FMA operation `c = a * b + c`, the accumualator `c` is already present in the register file. The threads need to load their `a`, `b` values into the register file to execute the FMA. 
 
 Arithmetic intensity (AI) is the ratio of computation performed to data moved from memory.
 
-$$
 \text{Arithmetic Intensity} = \frac{\text{Number of arithmetic operations}}{\text{Bytes transferred from memory}}
-$$
 
 For a single FMA, the AI is `2 FLOPs / 64 bytes` = `0.03125 FLOPs per byte` or 2 loads per FMA.
 
