@@ -19,6 +19,8 @@ Throughout this post we will consider a FP32 matrix multiply `C = A × B`, where
 
 ## Table of contents
 
+## Where the FLOPs come from
+
 Every SM is divided into 4 subpartitions known as SMSPs. Each SMSP has a warp scheduler which can issue one warp-wide instruction every cycle. A warp comprises 32 threads, and every thread's position in a warp is referred to as its lane (0–31). Each SMSP is also equipped with CUDA cores. On an H100, each SMSP hosts 32 FP32 CUDA cores; the A100 SMSP hosts 16 FP32 CUDA cores. The core count per SMSP is what decides how long a warp occupies the pipe. The H100's 32 FP32 cores retire a warp-wide FMA in a single cycle, matching the scheduler's issue rate. The A100's 16 cores need two cycles per warp, so its scheduler can only issue an FP32 FMA every other cycle and has to find other work, or another warp, to fill the gap.
 
 Each FP32 CUDA core can execute instructions like the FMA (fused multiply-add):
@@ -27,10 +29,7 @@ Each FP32 CUDA core can execute instructions like the FMA (fused multiply-add):
 d = a * b + c
 ```
 
-Essentially every FMA results in `2 FLOPs` -- one multiplication and one addition. The CUDA cores are pipelined, allowing every SMSP to perform `2 FLOPs` per cycle per core, reuslting in a peak throughput of `2 FLOPs x 32 = 64 FLOPs` per cycle. The whole SM can support a peak throughput of `4 x 64 FLOPs = 256 FLOPs` or `128 FMAs` per cycle.   
-
-
-
+Essentially every FMA results in `2 FLOPs` -- one multiplication and one addition. The CUDA cores are pipelined, allowing every SMSP to perform `2 FLOPs` per cycle per core, resulting in a peak throughput of `2 FLOPs x 32 = 64 FLOPs` per cycle. The whole SM can support a peak throughput of `4 x 64 FLOPs = 256 FLOPs` or `128 FMAs` per cycle.
 
 
 ## The problem is a ratio
