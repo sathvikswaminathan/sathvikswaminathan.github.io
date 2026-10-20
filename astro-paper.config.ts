@@ -7,7 +7,7 @@ export default defineAstroPaperConfig({
     description:
       "Sathvik Swaminathan, Silicon Design Engineer at AMD. Learning GPUs from a CPU background.",
     author: "Sathvik Swaminathan",
-    profile: "https://github.com/sathvikswaminathan",
+    profile: "https://www.linkedin.com/in/sathvik-swaminathan-50b424178/",
     ogImage: "default-og.jpg",
     lang: "en",
     timezone: "America/Chicago",
@@ -30,7 +30,10 @@ export default defineAstroPaperConfig({
     search: "pagefind",
   },
   socials: [
-    { name: "github", url: "https://github.com/sathvikswaminathan" },
+    {
+      name: "linkedin",
+      url: "https://www.linkedin.com/in/sathvik-swaminathan-50b424178/",
+    },
   ],
   shareLinks: [
     { name: "x", url: "https://x.com/intent/post?url=" },

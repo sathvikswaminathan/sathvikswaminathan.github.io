@@ -34,13 +34,12 @@ const homePath = getRelativeLocaleUrl(locale, "");
     class="app-layout my-1"
   >
     <section id="hero" class="border-border border-b pt-8 pb-6">
-      <h1 class="my-4 inline-block text-4xl font-bold sm:my-8 sm:text-5xl">
-        Learning GPUs
-      </h1>
+      {/* No visible hero heading. Kept for screen readers and SEO only. */}
+      <h1 class="sr-only">{config.site.title}</h1>
       <a
         target="_blank"
         href={`${import.meta.env.BASE_URL.replace(/\/?$/, "/")}rss.xml`}
-        class="inline-block"
+        class="mb-3 inline-block"
         aria-label="RSS Feed"
         title="RSS Feed"
       >
