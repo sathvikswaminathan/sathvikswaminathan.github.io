@@ -128,7 +128,7 @@ Each thread owns an `r × r` block of accumulators held in registers. Per k-step
 
 Same shape as the threadblock formula, same linear payoff, applied to a different tier. With `r = 8`, each value pulled out of shared memory feeds 8 FLOP instead of 1.
 
-The cost is register pressure. An `8×8` thread tile needs 64 accumulator registers, plus 8 + 8 for the fragments, plus addressing and loop state — call it ~85 registers per thread. Against a budget of 256 architectural registers per thread that's fine, but registers per SM are a fixed pool, so a higher per-thread count means fewer resident warps. Push `r` too far and the compiler spills to local memory, which is backed by device memory, and you have accidentally reintroduced the original problem at the innermost loop.
+The cost is register pressure. An `8×8` thread tile needs 64 accumulator registers, plus 8 + 8 for the fragments, plus addressing and loop state — call it ~85 registers per thread. Against a per-thread ceiling of 255 architectural registers that's fine, but registers per SM are a fixed pool, so a higher per-thread count means fewer resident warps. Push `r` too far and the compiler spills to local memory, which is backed by device memory, and you have accidentally reintroduced the original problem at the innermost loop.
 
 This is the characteristic tuning tension of GPU GEMM: **bigger tiles raise arithmetic intensity but lower occupancy**, and occupancy is what hides the latency the tiles didn't eliminate. There is no analytic optimum. It's why CUTLASS, Triton, and friends all end up doing some form of autotuning over tile shapes.
 
