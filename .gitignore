@@ -31,3 +31,6 @@ public/pagefind
 
 # docker compose
 compose.override.yaml
+
+# local publish helper (hardcoded paths, not for the public repo)
+publish.sh
