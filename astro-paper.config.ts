@@ -5,7 +5,7 @@ export default defineAstroPaperConfig({
     url: "https://sathvikswaminathan.github.io/",
     title: "Sathvik Swaminathan",
     description:
-      "Learning GPUs from a CPU background. Notes on GPU architecture and performance by Sathvik Swaminathan, Silicon Design Engineer at AMD, previously Research Scientist at Intel Labs.",
+      "Sathvik Swaminathan, Silicon Design Engineer at AMD. Learning GPUs from a CPU background.",
     author: "Sathvik Swaminathan",
     profile: "https://github.com/sathvikswaminathan",
     ogImage: "default-og.jpg",
