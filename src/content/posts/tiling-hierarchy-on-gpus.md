@@ -8,14 +8,21 @@ tags:
   - performance
   - memory-hierarchy
   - gemm
-description: GPUs are equipped with tremedous amount of compute and a tiered memory architecture. How data is placed and accessed across these tiers determines how much of that compute is being used. 
+description: GPUs are equipped with tremendous amount of compute and a tiered memory architecture. How data is placed and accessed across these tiers determines how much of that compute is being used. 
 ---
 
-Write a matrix multiply the obvious way and it will be correct, it will issue exactly the right number of floating-point operations, and it will run roughly an order of magnitude below what the hardware can do. Nothing is wrong with the arithmetic. The problem is that the kernel spends almost all of its time waiting for operands to arrive.
+Matrix multiplication, the most commonly run workload on GPUs, when written in the typical way, will run much slower than what the hardware is actually capable of. This is not because the GPU is not equipped with sufficient compute cores; rather, the compute cores remain idle while waiting for data to arrive.
 
-The fix is tiling, and the thing that trips people up is that it isn't one transformation applied once. Fast GEMM kernels tile at three nested levels, each one targeting a different tier of the memory hierarchy. This post is about why three, and what each level actually buys you.
+GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is frequently fetched from slower memory tiers or if memory requests are stalled due to address conflicts, among other factors.
+
+Throughout this post we will consider a matrix multiply `C = A × B`, where `A` is M×K, `B` is K×N, and `C` is M×N, with M = N = K = 4096.
 
 ## Table of contents
+
+
+
+
+
 
 ## The problem is a ratio
 
