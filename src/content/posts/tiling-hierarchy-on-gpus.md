@@ -159,6 +159,16 @@ Register prefetching removes them.
 
 The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory load latency of step `k+1` is completely overlapped with  the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then immediately issues the FMAs.
 
+```c
+load a_next, b_next for k = 0
+for k:
+    a, b = a_next, b_next             
+    issue 16 LDS for k+1 → a_next, b_next
+    64 FFMAs using a, b               
+```
+
+Scheduler trace during step k:
+
 ```text
 cycle  0-15 : issue 16 LDS for k+1      (overhead)
 cycle 16-79 : 64 FFMAs for step k       (useful)
