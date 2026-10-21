@@ -77,5 +77,5 @@ Maximizing this requires `M = N`, resulting in an AI of `0.5 × M` FMAs for ever
 
 ![Inner product loads a row of A and a column of B to produce one output element, while the outer product loads a column of A and a row of B to update every output element of C](./inner-vs-outer-product.png)
 
-> Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
+Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
 
