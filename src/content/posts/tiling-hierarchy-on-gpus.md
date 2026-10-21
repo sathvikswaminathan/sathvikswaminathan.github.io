@@ -11,9 +11,9 @@ tags:
 description: GPUs are equipped with a tremendous amount of compute and a tiered memory architecture. How data is placed and accessed across these tiers determines how much of that compute is actually used.
 ---
 
-Matrix multiplication, the most commonly run workload on GPUs, when written in the typical way, will run much slower than what the hardware is actually capable of. This is not because the GPU is not equipped with sufficient compute cores; rather, the compute cores remain idle while waiting for data to arrive.
+Matrix multiplication, the workload that dominates GPU time in deep learning, will run much slower than what the hardware is actually capable of when written in the straightforward way. This is not because the GPU lacks compute cores; rather, the compute cores remain idle while waiting for data to arrive.
 
-GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is frequently fetched from slower memory tiers, and if memory requests stall due to address conflicts, among other factors. The fix is to organize data across these tiers and group access patterns such that data is fed to the compute cores from the fastest tier with minimal memory stalls.
+GPUs have a tiered memory hierarchy, with each level being larger but slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
 
 Throughout this post we will consider an FP32 matrix multiply `C = A × B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`, with `M = N = K = 4096`.
 
@@ -79,7 +79,9 @@ Maximizing this requires `M = N`, resulting in an AI of `0.5 × M` FMAs for ever
 
 Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
 
-### How much AI does it take to saturate the CUDA cores?
+## Register tiling
+
+How much AI does it take to saturate the CUDA cores?
 
 As we will see in the next section, CUDA threads load data from GMEM into SMEM, so every load into the register file is served by shared memory.
 
@@ -94,5 +96,7 @@ Therefore, for the outer product to sustain the SM's peak throughput,
 `m / 2 = 4` → `m = 8`.
 
 This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit.
+
+Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a thread tile (or a lane tile) and this technique is referred to as rgeister tiling. 
 
 ![Arithmetic intensity grows as m over 2 with the thread tile size, crossing the required intensity of 4 at m equals 8, where a thread loads 8 values of A and 8 values of B to compute an 8 by 8 tile of 64 accumulators](./thread-tile-8x8.png)
