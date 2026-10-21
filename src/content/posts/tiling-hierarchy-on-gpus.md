@@ -45,7 +45,7 @@ For a single FMA, the AI is `2 FLOPs / 64 bytes` = `0.03125 FLOPs per byte`, or 
 
 Now, let's compute the AI for matrix multiplication.
 
-For `C = A × B`:
+There are two ways of computing `C = A × B`: 
 
 ### Inner Product
 
@@ -77,5 +77,5 @@ Maximizing this requires `M = N`, resulting in an AI of `0.5 × M` FMAs for ever
 
 ![Inner product loads a row of A and a column of B to produce one output element, while the outer product loads a column of A and a row of B to update every output element of C](./inner-vs-outer-product.png)
 
-> Since `M > 1` for a matrix, the outer product will always have a much higher AI than the inner product, because every value it loads is reused across an entire row or column of `C`.
+> Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
 
