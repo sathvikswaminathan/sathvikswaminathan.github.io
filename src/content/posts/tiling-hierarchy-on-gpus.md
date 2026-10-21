@@ -196,7 +196,7 @@ Why stop at a thread tile size of 8×8? With register prefetching, an m×n tile 
 
 ![Registers per thread grow with the tile area, from 32 at 4 by 4 to 320 at 16 by 16, which overshoots the 255 register limit and spills to local memory, while the issue-slot efficiency ceiling it buys flattens from 67% to 80% to 84%](./tile-size-tradeoff.png)
 
-Moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4 percentage points, while consuming 80 more registers per thread. A 16×16 tile doesn't fit at all: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
+Moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4%, while consuming 80 more registers per thread. A 16×16 tile doesn't fit at all: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
 
 - `STL` (store local) when the value is evicted
 - `LDL` (load local) when it is needed again
@@ -213,9 +213,8 @@ For an 8×8 tile that is 16,384 / 64 = 256 threads, and for an 8×16 tile it is 
 |---|---|---|---|---|---|---|
 | 8×8, CTA 128×128 | 256 | ~128 | 32,768 | 2 | 16 | 4 |
 | 8×16, CTA 128×128 | 128 | ~200 | 25,600 | 2 | 8 | 2 |
-| 8×16, CTA 128×256 | 256 | ~200 | 51,200 | 1 | 8 | 2 |
 
-(The last row keeps 256 threads per CTA by making the CTA tile bigger instead.) Either way, while 8×16 slightly raises the efficiency ceiling, it does so at the cost of halving the occupancy. Each SMSP's warp scheduler would only have 2 warps to choose from. If a warp stalls, for example on a global load or at a barrier, the scheduler is more likely to have no other work to pick up, and the idle slots go up.
+While 8×16 slightly raises the efficiency ceiling, it does so at the cost of halving the occupancy. Each SMSP's warp scheduler would only have 2 warps to choose from. If a warp stalls, for example on a global load or at a barrier, the scheduler is more likely to have no other work to pick up, and the idle slots go up.
 
 ![With 4 warps per SMSP a stalled warp is always covered by another one, so every issue slot is filled; with only 2 warps per SMSP the same stall pattern leaves cycles where both warps are stalled and the issue slot goes idle](./warps-per-smsp.png)
 
