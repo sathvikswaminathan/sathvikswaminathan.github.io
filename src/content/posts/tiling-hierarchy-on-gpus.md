@@ -97,6 +97,6 @@ Therefore, for the outer product to sustain the SM's peak throughput,
 
 This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit.
 
-Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a thread tile (or a lane tile) and this technique is referred to as rgeister tiling. 
+Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile** (or a lane tile) and this technique is referred to as **register tiling**. 
 
 ![Arithmetic intensity grows as m over 2 with the thread tile size, crossing the required intensity of 4 at m equals 8, where a thread loads 8 values of A and 8 values of B to compute an 8 by 8 tile of 64 accumulators](./thread-tile-8x8.png)
