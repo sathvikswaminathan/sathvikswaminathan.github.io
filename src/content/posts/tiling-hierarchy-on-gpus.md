@@ -41,7 +41,7 @@ $$
 \text{Arithmetic Intensity} = \frac{\text{Number of arithmetic operations}}{\text{Bytes transferred from memory}}
 $$
 
-For a single FMA, the AI is `2 FLOPs / 64 bytes` = `0.03125 FLOPs per byte`, or 2 loads per FMA. A higher AI helps keep the cores busy for longer.
+For a single FMA, the AI is `2 FLOPs / 8 bytes` = `0.25 FLOPs per byte`, or 2 loads per FMA. A higher AI helps keep the cores busy for longer.
 
 Now, let's compute the AI for matrix multiplication.
 
@@ -100,3 +100,19 @@ This means every thread must load at least `8` values of `A` and `8` values of `
 Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile** (or a lane tile) and this technique is referred to as **register tiling**. 
 
 ![Arithmetic intensity grows as m over 2 with the thread tile size, crossing the required intensity of 4 at m equals 8, where a thread loads 8 values of A and 8 values of B to compute an 8 by 8 tile of 64 accumulators](./thread-tile-8x8.png)
+
+## Issue Slot Efficiency
+
+The previous section went over how to load data into registers to hit an SM's peak compute throughput. However, this is only relevant if the warp scheduler is able to constantly issue FMAs in every cycle. If there is no FMA to execute, register tiling will not matter. There are a couple of reasons for an FMA cannot be issued in a issue slot:
+
+| Loss | What happens in that cycle | Example causes |
+| --- | --- | --- |
+| Overhead slot | Something issued, but it wasn't an FFMA | `LDS`, address math, loop branch, `__syncthreads` |
+| Idle slot | Nothing issued: every warp on the SMSP is stalled | Waiting for a load to return, shared-memory pipe congested, barrier |
+
+Therefore, it is useful to quantify the number of issue slots during which an FMA is achieved as that a the metric we would like to maximize:
+
+```
+issue-slot efficiency η = cycles that issued an FFMA / total cycles
+```
+
