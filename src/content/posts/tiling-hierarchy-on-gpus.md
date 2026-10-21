@@ -79,3 +79,20 @@ Maximizing this requires `M = N`, resulting in an AI of `0.5 × M` FMAs for ever
 
 Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
 
+### How much AI does it take to saturate the CUDA cores?
+
+As we will see in the next section, CUDA threads load data from GMEM into SMEM, so every load into the register file is served by shared memory.
+
+On an H100, an SM sustains a peak throughput of `128` FMAs per cycle, and each FMA needs `2` FP32 operands. For a lane to issue an FMA in the next cycle, its operands must already be sitting in registers. But the SM's shared-memory pipe only delivers about `128 bytes` (`32` FP32 values) per cycle into the register file. If every FMA used unique operands, the SM would need `128 × 2 = 256` FP32 values every cycle. Those `32` loaded values must therefore be shared across all `128` FMAs, which pins the required arithmetic intensity at `128 FMAs / 32 loads = 4 FMAs` per load.
+
+![Without reuse, 32 loaded FP32 values feed only 16 FMAs and 112 of the SM's 128 lanes sit idle; with each loaded value feeding 4 FMAs, all 128 lanes stay busy](./required-arithmetic-intensity.png)
+
+Now compare this against the outer product. A single `k` step needs `M` values of `A` and `N` values of `B` in the registers. Since `M` and `N` are both far too large to fit in the register file, every CUDA thread instead computes a small `m×n` tile of the output matrix and loads only `m + n` values. Assuming `m = n`, each thread computes an `m×m` output tile from `2m` loaded values, resulting in an AI of `m² / 2m = m/2`.
+
+Therefore, for the outer product to sustain the SM's peak throughput,
+
+`m / 2 = 4` → `m = 8`.
+
+This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit.
+
+![Arithmetic intensity grows as m over 2 with the thread tile size, crossing the required intensity of 4 at m equals 8, where a thread loads 8 values of A and 8 values of B to compute an 8 by 8 tile of 64 accumulators](./thread-tile-8x8.png)
