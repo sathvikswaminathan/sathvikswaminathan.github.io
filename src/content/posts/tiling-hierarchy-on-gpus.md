@@ -183,7 +183,7 @@ These `LDS` instructions are issued as a warp-wide load instruction by the whole
 #### Warp Tiling
 
 
-### Bigger tile size to lower overhead slots
+### Reducing Overhead Slots
 
 Why stop at a thread tile size of 8×8? With register prefetching, an m×n tile needs at least m·n + 2(m + n) registers: m·n accumulators, plus two sets of m + n operands. On top of that come ~20–30 registers for addresses, loop counters and indices, and the hardware limit is 255 registers per thread. An 8×16 tile would need 176 registers before this overhead, still under the limit. A bigger tile has a higher arithmetic intensity, meaning we perform more FMAs per `LDS` instruction. Fewer issue slots are then used up by `LDS`, which improves the issue-slot efficiency.
 
