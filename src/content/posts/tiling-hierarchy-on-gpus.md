@@ -128,6 +128,8 @@ Overhead slots cannot be eliminated entirely: every thread still has to load its
 
 > So why not choose a tile size greater than 8x8?
 
+### Bigger tile sizes
+
 
 Idle slots, on the other hand, can be reduced by writing better kernel code.
 
