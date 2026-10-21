@@ -111,7 +111,7 @@ for k:
 
 ## Issue Slot Efficiency
 
-The previous section went over how to load data into registers to hit an SM's peak compute throughput. That only matters, however, if the warp scheduler actually has an FMA to issue in every cycle; if it does not, register tiling buys us nothing. There are two reasons an FMA may not be issued in a given issue slot:
+The previous section went over how to load data into registers to hit an SM's peak compute throughput. That only matters, however, if the warp scheduler actually has an FMA to issue in every cycle; if it does not, register tiling does not matter. There are two reasons an FMA may not be issued in a given issue slot:
 
 | Issue slot | What happens in that cycle | Example causes |
 | --- | --- | --- |
@@ -148,11 +148,13 @@ cycle  38-101 : 64 FFMAs                              (64 useful slots)
 ~102 cycles for 64 FFMAs  ->  η ≈ 63%
 ```
 
-Those 22 idle slots are 22 cycles in which the CUDA cores have nothing to chew on, purely because the loop waits on its own loads. Register prefetching removes them.
+The CUDA cores are idle during the 22 idle slots, waiting for the data to be loaded.
+
+Register prefetching removes them.
 
 ### Register prefetching
 
-The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory latency of step `k+1` hides entirely behind the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then goes straight into FMAs with no stall in between.
+The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory load latency of step `k+1` is completely overlapped with  the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then immediately issues the FMAs.
 
 ```text
 cycle  0-15 : issue 16 LDS for k+1      (overhead)
@@ -162,4 +164,4 @@ cycle 16-79 : 64 FFMAs for step k       (useful)
 80 cycles for 64 FFMAs  ->  η = 80%
 ```
 
-Register prefetching raises η from ~63% to 80%. The catch is that each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching — which pushes the register budget from 80 to 96 registers per thread.
+Register prefetching raises η from ~63% to 80%. However, this comes at a cost. Each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching, increasing the register budget from 80 to 96 registers per thread.
