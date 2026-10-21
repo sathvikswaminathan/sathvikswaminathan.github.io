@@ -79,7 +79,7 @@ Maximizing this requires `M = N`, resulting in an AI of `0.5 × M` FMAs for ever
 
 Since both `M` and `N` are typically large, the outer product has a far higher AI than the inner product due to higher data reuse.
 
-## Register Tiling
+### Register Tiling
 
 How much AI does it take to saturate the CUDA cores?
 
@@ -126,10 +126,7 @@ issue-slot efficiency η = cycles that issued an FMA / total cycles
 
 Overhead slots cannot be eliminated entirely: every thread still has to load its operands, compute addresses, advance the loop, and synchronize with its peers. Their cost can only be amortized by doing more compute per overhead instruction, which is exactly what a larger thread tile gives us.
 
-> So why not choose a tile size greater than 8x8?
-
-### Bigger tile sizes
-
+### Eliminating Idle slots
 
 Idle slots, on the other hand, can be reduced by writing better kernel code.
 
@@ -157,7 +154,7 @@ The CUDA cores are idle during the 22 idle slots, waiting for the data to be loa
 
 Register prefetching removes them.
 
-### Register prefetching
+#### Register prefetching
 
 The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory load latency of step `k+1` is completely overlapped with  the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then immediately issues the FMAs.
 
@@ -183,4 +180,44 @@ Register prefetching raises η from ~63% to 80%. However, this comes at a cost. 
 
 These `LDS` instructions are issued as a warp-wide load instruction by the whole warp to shared memory. They carry addresses requested by all 32 threads, each of which is loading data for its `8×8` tile. The effective bandwidth with which SMEM delivers this data to the warp depends on which tiles the 32 threads are trying to compute. If they are grouped such that the `LDS` leads to a lot of bank conflicts, that would again lead to idle slots, as the `LDS` for step k + 1 can take longer than the compute in step `k`. This is what warp tiling addresses.
 
-## Warp Tiling
+#### Warp Tiling
+
+
+### Bigger tile size to lower overhead slots
+
+Why stop at a thread tile size of 8×8? With register prefetching, an m×n tile needs at least m·n + 2(m + n) registers: m·n accumulators, plus two sets of m + n operands. On top of that come ~20–30 registers for addresses, loop counters and indices, and the hardware limit is 255 registers per thread. An 8×16 tile would need 176 registers before this overhead, still under the limit. A bigger tile has a higher arithmetic intensity, meaning we perform more FMAs per `LDS` instruction. Fewer issue slots are then used up by `LDS`, which improves the issue-slot efficiency.
+
+| Tile | FFMAs / k | LDS / k | Ceiling η | Registers (acc + 2× operands) |
+|---|---|---|---|---|
+| 4×4 | 16 | 8 | 67% | 16 + 16 = 32 |
+| 8×8 | 64 | 16 | 80% | 64 + 32 = 96 |
+| 8×16 | 128 | 24 | 84% | 128 + 48 = 176 |
+| 16×16 | 256 | 32 | 89% | 256 + 64 = 320 > 255 ✗ |
+
+![Registers per thread grow with the tile area, from 32 at 4 by 4 to 320 at 16 by 16, which overshoots the 255 register limit and spills to local memory, while the issue-slot efficiency ceiling it buys flattens from 67% to 80% to 84%](./tile-size-tradeoff.png)
+
+Moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4 percentage points, while consuming 80 more registers per thread. A 16×16 tile doesn't fit at all: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
+
+- `STL` (store local) when the value is evicted
+- `LDL` (load local) when it is needed again
+
+These instructions add overhead slots, and waiting for the `LDL`s to return adds idle slots. That's the very problem we are trying to avoid, so choosing 16×16 would be counterproductive.
+
+To see why 8×16 might also be problematic, let's assume a thread block (CTA) computes a 128×128 block of the 4096×4096 output matrix. The number of threads needed per block is:
+
+threads per CTA = outputs per CTA / outputs per thread
+
+For an 8×8 tile that is 16,384 / 64 = 256 threads, and for an 8×16 tile it is 16,384 / 128 = 128 threads. Including the bookkeeping registers, an 8×8 tile needs about 128 registers per thread and an 8×16 tile about 200. An H100 SM has 65,536 registers, so:
+
+| Configuration | Threads/CTA | Regs/thread | Regs/CTA | CTAs per SM (65,536 regs) | Warps/SM | Warps/SMSP |
+|---|---|---|---|---|---|---|
+| 8×8, CTA 128×128 | 256 | ~128 | 32,768 | 2 | 16 | 4 |
+| 8×16, CTA 128×128 | 128 | ~200 | 25,600 | 2 | 8 | 2 |
+| 8×16, CTA 128×256 | 256 | ~200 | 51,200 | 1 | 8 | 2 |
+
+(The last row keeps 256 threads per CTA by making the CTA tile bigger instead.) Either way, while 8×16 slightly raises the efficiency ceiling, it does so at the cost of halving the occupancy. Each SMSP's warp scheduler would only have 2 warps to choose from. If a warp stalls, for example on a global load or at a barrier, the scheduler is more likely to have no other work to pick up, and the idle slots go up.
+
+![With 4 warps per SMSP a stalled warp is always covered by another one, so every issue slot is filled; with only 2 warps per SMSP the same stall pattern leaves cycles where both warps are stalled and the issue slot goes idle](./warps-per-smsp.png)
+
+So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and libraries often autotune tile sizes for each GPU and problem shape. For the rest of this blog, we will assume a thread tile size of 8x8.
+
