@@ -99,20 +99,67 @@ This means every thread must load at least `8` values of `A` and `8` values of `
 
 Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile** (or a lane tile) and this technique is referred to as **register tiling**. 
 
+Here is what the kernel looks like from a single thread's perspective:
+
+```c
+for k:
+    load a[0..7], b[0..7]        
+    64 FFMAs using a, b          
+```
+
 ![Arithmetic intensity grows as m over 2 with the thread tile size, crossing the required intensity of 4 at m equals 8, where a thread loads 8 values of A and 8 values of B to compute an 8 by 8 tile of 64 accumulators](./thread-tile-8x8.png)
 
 ## Issue Slot Efficiency
 
-The previous section went over how to load data into registers to hit an SM's peak compute throughput. However, this is only relevant if the warp scheduler is able to constantly issue FMAs in every cycle. If there is no FMA to execute, register tiling will not matter. There are a couple of reasons for an FMA cannot be issued in a issue slot:
+The previous section went over how to load data into registers to hit an SM's peak compute throughput. That only matters, however, if the warp scheduler actually has an FMA to issue in every cycle; if it does not, register tiling buys us nothing. There are two reasons an FMA may not be issued in a given issue slot:
 
-| Loss | What happens in that cycle | Example causes |
+| Issue slot | What happens in that cycle | Example causes |
 | --- | --- | --- |
 | Overhead slot | Something issued, but it wasn't an FFMA | `LDS`, address math, loop branch, `__syncthreads` |
 | Idle slot | Nothing issued: every warp on the SMSP is stalled | Waiting for a load to return, shared-memory pipe congested, barrier |
 
-Therefore, it is useful to quantify the number of issue slots during which an FMA is achieved as that a the metric we would like to maximize:
+It is therefore useful to quantify the fraction of issue slots that actually carry an FMA, since that is the metric we want to maximize:
 
-```
-issue-slot efficiency η = cycles that issued an FFMA / total cycles
+```text
+issue-slot efficiency η = cycles that issued an FMA / total cycles
 ```
 
+Overhead slots cannot be eliminated entirely: every thread still has to load its operands, compute addresses, advance the loop, and synchronize with its peers. Their cost can only be amortized by doing more compute per overhead instruction, which is exactly what a larger thread tile gives us.
+
+Idle slots, on the other hand, can be reduced by writing better kernel code.
+
+Consider the code from the previous section:
+
+```c
+for k:
+    load a[0..7], b[0..7]        // 16 LDS
+    64 FFMAs using a, b          // must wait for the loads        
+```
+
+On an H100, a shared-memory load (`LDS`) takes about 30 clock cycles when there are no bank conflicts. Tracing one `k` step through the scheduler:
+
+```text
+cycle   0-15  : issue 16 LDS                          (16 overhead slots)
+cycle  16-37  : nothing to issue: the first FFMA needs
+                a0 and b0, and b0 (issued at cycle 8)
+                comes back at ~38                     (~22 idle slots)
+cycle  38-101 : 64 FFMAs                              (64 useful slots)
+-------------------------------------------------------------
+~102 cycles for 64 FFMAs  ->  η ≈ 63%
+```
+
+Those 22 idle slots are 22 cycles in which the CUDA cores have nothing to chew on, purely because the loop waits on its own loads. Register prefetching removes them.
+
+### Register prefetching
+
+The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory latency of step `k+1` hides entirely behind the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then goes straight into FMAs with no stall in between.
+
+```text
+cycle  0-15 : issue 16 LDS for k+1      (overhead)
+cycle 16-79 : 64 FFMAs for step k       (useful)
+              k+1's loads, issued 0-15, are back by ~45, well before cycle 80
+-------------------------------------------------------------
+80 cycles for 64 FFMAs  ->  η = 80%
+```
+
+Register prefetching raises η from ~63% to 80%. The catch is that each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching — which pushes the register budget from 80 to 96 registers per thread.
