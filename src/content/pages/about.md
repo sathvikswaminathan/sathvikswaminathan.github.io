@@ -20,5 +20,5 @@ My background is CPU performance analysis and memory management in tiered memory
 
 ## Patents
 
-- [Proactive Bandwidth-Aware Memory Tiering for Efficient LLM Inference](https://patents.justia.com/patent/20260236467)
-- [Context-Aware Memory Tiering for Machine Learning Training](https://patents.justia.com/patent/20250328766)
+- [Proactive Bandwidth-Aware Memory Tiering for Efficient LLM Inference](https://scholar.google.com/citations?view_op=view_citation&hl=en&user=AoOX4xwAAAAJ&citation_for_view=AoOX4xwAAAAJ:9yKSN-GCB0IC)
+- [Context-Aware Memory Tiering for Machine Learning Training](https://scholar.google.com/citations?view_op=view_citation&hl=en&user=AoOX4xwAAAAJ&citation_for_view=AoOX4xwAAAAJ:d1gkVwhDpl0C)
