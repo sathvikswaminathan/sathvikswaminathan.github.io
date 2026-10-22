@@ -83,7 +83,7 @@ Since both `M` and `N` are typically large, the outer product has a far higher A
 
 How much AI does it take to saturate the CUDA cores?
 
-As we will see in the next section, CUDA threads load data from GMEM into SMEM, so every load into the register file is served by shared memory.
+As we will see later, CUDA threads load data from GMEM into SMEM, so every load into the register file is served by shared memory.
 
 On an H100, an SM sustains a peak throughput of `128` FMAs per cycle, and each FMA needs `2` FP32 operands. For a lane to issue an FMA in the next cycle, its operands must already be sitting in registers. But the SM's shared-memory pipe only delivers about `128 bytes` (`32` FP32 values) per cycle into the register file. If every FMA used unique operands, the SM would need `128 × 2 = 256` FP32 values every cycle. Those `32` loaded values must therefore be shared across all `128` FMAs, which pins the required arithmetic intensity at `128 FMAs / 32 loads = 4 FMAs` per load.
 
@@ -97,7 +97,7 @@ Therefore, for the outer product to sustain the SM's peak throughput,
 
 This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit.
 
-Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile** (or a lane tile) and this technique is referred to as **register tiling**. 
+Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile (TM, TN)** (or a lane tile) and this technique is referred to as **register tiling**. 
 
 Here is what the kernel looks like from a single thread's perspective:
 
@@ -176,12 +176,60 @@ cycle 16-79 : 64 FFMAs for step k       (useful)
 80 cycles for 64 FFMAs  ->  η = 80%
 ```
 
-Register prefetching raises η from ~63% to 80%. However, this comes at a cost. Each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching, increasing the register budget from 80 to 96 registers per thread.
+Register prefetching raises η from ~63% to 80%. However, this comes at a cost. Each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching, increasing the register budget from 80 to 96 registers per thread. This is referred to as **register double buffering**.
 
 These `LDS` instructions are issued as a warp-wide load instruction by the whole warp to shared memory. They carry addresses requested by all 32 threads, each of which is loading data for its `8×8` tile. The effective bandwidth with which SMEM delivers this data to the warp depends on which tiles the 32 threads are trying to compute. If they are grouped such that the `LDS` leads to a lot of bank conflicts, that would again lead to idle slots, as the `LDS` for step k + 1 can take longer than the compute in step `k`. This is what warp tiling addresses.
 
 #### Warp Tiling
 
+Every one of the 32 threads in a warp computes a `TM × TN` = 8×8 thread tile of the output. A warp therefore computes 32 such thread tiles. How these 32 tiles are arranged within the output matrix determines which addresses are grouped into a warp's `LDS` instruction. This, in turn, determines whether the instruction is serviced by shared memory with bank conflicts, can take advantage of broadcasts, and so on.
+
+If bank conflicts occur, the `LDS` instruction takes longer to deliver all the required data, resulting in idle slots. On the other hand, if there are no bank conflicts and the data is shared across threads such that it can be broadcast, `LDS` can deliver the data much more efficiently and its latency can often be overlapped with compute.
+
+Therefore, the placement of these 32 thread tiles within a warp is critical for minimizing idle slots and increasing issue-slot efficiency.
+
+Now, assume the thread block (CTA) containing this warp computes a `BM × BN` = 128×128 output tile. At 8×8 per thread, the CTA needs `(BM · BN) / (TM · TN) = 16,384 / 64 = 256` threads, or 8 warps. Within a warp, the 32 lanes can be laid out as any `LM × LN` grid with `LM · LN = 32`, which makes the warp responsible for a **warp tile** of `WM = TM · LM` rows by `WN = TN · LN` columns. Each (row, column) position in the `LM × LN` lane grid refers to the `TM × TN` thread tile owned by a single lane.
+
+To see what the lane grid actually buys us, follow a single `k` step. The lane at position `(i, j)` of the `LM × LN` grid owns the thread tile sitting at row block `i`, column block `j` of the warp tile, so in that `k` step it needs
+
+- the `TM` = 8 values of `A` belonging to rows `[TM·i, TM·i + TM)`, and
+- the `TN` = 8 values of `B` belonging to columns `[TN·j, TN·j + TN)`.
+
+The row index `i` does not depend on `j`, and the column index `j` does not depend on `i`. So **every lane in the same row of the lane grid asks for exactly the same `TM` values of `A`**, and **every lane in the same column asks for exactly the same `TN` values of `B`**. Those repeats are not extra work for shared memory: when several lanes in a warp request the same address, the bank reads the word once and broadcasts it to all of them in the same cycle.
+
+So the warp issues `32 × (TM + TN) = 512` operand requests per `k` step regardless of the layout, but they collapse into far fewer distinct addresses — one group of `TM` values of `A` per lane-grid row and one group of `TN` values of `B` per lane-grid column:
+
+$$
+\underbrace{T_M \cdot L_M}_{W_M} \;+\; \underbrace{T_N \cdot L_N}_{W_N}
+\;=\; \text{distinct floats pulled out of SMEM per } k \text{ step}
+$$
+
+![Two lane grids side by side. In the 4x8 grid, the 8 lanes of a row all share one group of 8 A values and the 4 lanes of a column share one group of 8 B values, collapsing 512 requests into 32 + 64 = 96 distinct floats. In the 2x16 grid, A is broadcast 16 ways but B only 2 ways, collapsing the same 512 requests into just 16 + 128 = 144 distinct floats](./warp-broadcast.png)
+
+Both arrangements above issue the same 512 requests and perform the same `32 × TM × TN = 2048` FMAs. What differs is how the broadcast factor is split between the two operands. A `4×8` grid broadcasts `A` 8 ways and `B` 4 ways; a `2×16` grid broadcasts `A` 16 ways but `B` only 2 ways, and that lopsided reuse on `B` is what inflates the total from 96 distinct floats to 144.
+
+Since the compute per `k` step is fixed, the only thing the lane layout changes is how much data has to come out of shared memory:
+
+| Lane grid `LM × LN` | Warp tile `WM × WN` | Unique `A` (= `WM`) | Unique `B` (= `WN`) | Total unique floats (Unique `A` + Unique `B`) | FMAs per float |
+|---|---|---|---|---|---|
+| 1×32 | 8×256 | 8 | 256 | 264 | 7.8 ✗ |
+| 2×16 | 16×128 | 16 | 128 | 144 | 14.2 |
+| 4×8 | 32×64 | 32 | 64 | **96** | **21.3** |
+| 8×4 | 64×32 | 64 | 32 | **96** | **21.3** |
+| 16×2 | 128×16 | 128 | 16 | 144 | 14.2 |
+| 32×1 | 256×8 | 256 | 8 | 264 | 7.8 ✗ |
+
+The `1×32` and `32×1` lane grids are not possible because the warp tile would be 8×256 or 256×8, and its 256-wide dimension exceeds the 128×128 CTA tile (`WN > BN` or `WM > BM`).
+
+![...](./warp-shape.png)
+
+Among the remaining grids, `4×8` and `8×4` result in the fewest unique floats, allowing data to be broadcast while serving an `LDS` request from shared memory. Both also divide the CTA evenly: a 32×64 warp tile gives a 4×2 arrangement of the 8 warps, and a 64×32 warp tile gives a 2×4 arrangement.
+
+The warp tile is the union of all 32 thread tiles assigned to a warp. Its dimensions are therefore:
+
+```
+(WM, WN) = (TM · LM, TN · LN)
+```
 
 ### Reducing Overhead Slots
 
