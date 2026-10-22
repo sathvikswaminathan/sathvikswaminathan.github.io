@@ -1,0 +1,68 @@
+---
+/**
+ * Cookie-free visitor analytics via GoatCounter.
+ *
+ * Renders nothing until `features.analytics.endpoint` is set, so the config
+ * can be committed with a placeholder without loading a dead script.
+ *
+ * No localhost guard is needed here: GoatCounter's own `filter()` rejects
+ * localhost, private ranges and `file:` URLs, so `pnpm dev` is never counted.
+ */
+import { warnOnce } from "@/utils/warnOnce";
+import config from "@/config";
+
+const { analytics } = config.features;
+const endpoint = analytics ? analytics.endpoint : "";
+
+if (analytics && !endpoint) {
+  warnOnce(
+    "[analytics] GoatCounter is enabled but endpoint is empty — analytics " +
+      "will not load. Set it to https://<your-code>.goatcounter.com/count in " +
+      "astro-paper.config.ts."
+  );
+}
+
+// `no_onload` suppresses the vendor's automatic page-load hit. The site uses
+// View Transitions, so navigations never reload the document; counting is
+// driven from `astro:page-load` below instead, which fires on first paint and
+// on every subsequent swap.
+const counter = `
+(function () {
+  var lastPath = null;
+
+  function countPage() {
+    var path = location.pathname + location.search;
+    // The vendor script is async, so this races astro:page-load on first
+    // paint. Whichever lands second is a no-op for the same path. Only
+    // consecutive repeats collapse, so A -> B -> A still counts A twice.
+    if (path === lastPath) return;
+    if (!window.goatcounter || !window.goatcounter.count) return;
+    lastPath = path;
+    window.goatcounter.count({ path: path });
+  }
+
+  window.__gcCount = countPage;
+
+  if (!window.__gcBound) {
+    window.__gcBound = true;
+    document.addEventListener("astro:page-load", countPage);
+  }
+})();
+`;
+---
+
+{
+  endpoint && (
+    <>
+      <script is:inline set:html={counter} />
+      <script
+        is:inline
+        async
+        src="https://gc.zgo.at/count.js"
+        data-goatcounter={endpoint}
+        data-goatcounter-settings='{"no_onload": true}'
+        onload="window.__gcCount && window.__gcCount()"
+      />
+    </>
+  )
+}

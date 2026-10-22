@@ -41,7 +41,8 @@ Body goes here.
 ```
 
 Required frontmatter: `title`, `description`, `pubDatetime`. Optional: `author`,
-`modDatetime`, `featured`, `draft`, `tags`, `ogImage`, `canonicalURL`.
+`modDatetime`, `featured`, `draft`, `tags`, `ogImage`, `canonicalURL`,
+`hideEditPost`, `hideComments`.
 
 > **Note:** `pubDatetime` must be in the past or the post is treated as scheduled
 > and hidden from production builds. The 15-minute grace window is set by
@@ -50,6 +51,42 @@ Required frontmatter: `title`, `description`, `pubDatetime`. Optional: `author`,
 ## Configuration
 
 Site title, description, socials, and feature flags live in `astro-paper.config.ts`.
+
+## Comments and analytics
+
+Both are client-side embeds configured under `features` in `astro-paper.config.ts`,
+and both stay inert until their IDs are filled in — an empty value renders nothing
+and logs a warning during `pnpm build`. The IDs are public identifiers that appear
+in page source by design, so they belong in the repo, not in Actions secrets.
+
+### Comments — [giscus](https://giscus.app) (GitHub Discussions)
+
+Comments appear at the bottom of each post as a Discussion thread. Reply from the
+page or from the repo's Discussions tab. Set `hideComments: true` in a post's
+frontmatter to opt that post out.
+
+One-time setup:
+
+1. Repo **Settings → General → Features → Discussions**: enable.
+2. In **Discussions**, create a category named `Comments` with type
+   **Announcement**, so only you can open top-level threads.
+3. Install the [giscus GitHub App](https://github.com/apps/giscus) on the repo.
+4. On [giscus.app](https://giscus.app), enter the repo and pick the `Comments`
+   category, then copy the generated `data-repo-id` and `data-category-id` into
+   `features.comments.repoId` and `features.comments.categoryId`.
+
+The widget follows the site's light/dark toggle; override the giscus themes with
+`features.comments.lightTheme` / `darkTheme`.
+
+### Analytics — [GoatCounter](https://www.goatcounter.com)
+
+Cookie-free, so no consent banner is needed. Create a site on GoatCounter (free
+for non-commercial use) and set `features.analytics.endpoint` to
+`https://<your-code>.goatcounter.com/count`.
+
+Because the site uses View Transitions, pageviews are counted manually on
+`astro:page-load` rather than on document load. GoatCounter's own filter drops
+localhost and private addresses, so `pnpm dev` traffic is never recorded.
 
 ## Deploying
 

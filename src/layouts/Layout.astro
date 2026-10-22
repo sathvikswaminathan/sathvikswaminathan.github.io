@@ -4,6 +4,7 @@ import { ClientRouter } from "astro:transitions";
 import { getRelativeLocaleUrl } from "astro:i18n";
 import { resolveDefaultOgImagePath } from "@/utils/resolveDefaultOgImagePath";
 import { getAssetPath } from "@/utils/withBase";
+import Analytics from "@/components/Analytics.astro";
 import config from "@/config";
 import "@/styles/global.css";
 
@@ -113,6 +114,8 @@ const rssHref = getRelativeLocaleUrl(
         window.__theme = { value: theme };
       })();
     </script>
+
+    <Analytics />
 
     <ClientRouter />
   </head>

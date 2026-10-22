@@ -59,7 +59,65 @@ interface FeaturesConfig {
    * Set to false to disable search entirely.
    */
   search?: "pagefind" | false;
+  /**
+   * Comment system shown on post detail pages.
+   * Set to false to disable comments entirely.
+   */
+  comments?: CommentsConfig | false;
+  /**
+   * Site-wide visitor analytics.
+   * Set to false to disable analytics entirely.
+   */
+  analytics?: AnalyticsConfig | false;
 }
+
+/**
+ * Comments backed by GitHub Discussions via giscus (https://giscus.app).
+ *
+ * Requires Discussions enabled on `repo` and the giscus GitHub App installed
+ * (https://github.com/apps/giscus). Generate `repoId` and `categoryId` on
+ * https://giscus.app — both are public identifiers, not secrets.
+ */
+interface GiscusConfig {
+  provider: "giscus";
+  /** Repo hosting the Discussions, as "owner/name" */
+  repo: `${string}/${string}`;
+  /** Repo node ID from giscus.app */
+  repoId: string;
+  /** Discussion category name, e.g. "Comments" */
+  category: string;
+  /** Category node ID from giscus.app */
+  categoryId: string;
+  /** How posts map to discussions. Defaults to "pathname". */
+  mapping?: "pathname" | "url" | "title" | "og:title";
+  /** Require an exact mapping match instead of a fuzzy search. Defaults to true. */
+  strict?: boolean;
+  /** Show reactions for the main post. Defaults to true. */
+  reactionsEnabled?: boolean;
+  /** Place the comment box above or below the thread. Defaults to "bottom". */
+  inputPosition?: "top" | "bottom";
+  /** giscus theme used in light mode. Defaults to "light". */
+  lightTheme?: string;
+  /** giscus theme used in dark mode. Defaults to "dark". */
+  darkTheme?: string;
+  /** giscus UI language. Defaults to site.lang. */
+  lang?: string;
+}
+
+type CommentsConfig = GiscusConfig;
+
+/**
+ * Cookie-free analytics via GoatCounter (https://www.goatcounter.com).
+ * No consent banner required. Local/private addresses are filtered out by
+ * the vendor script, so `pnpm dev` traffic is never counted.
+ */
+interface GoatCounterConfig {
+  provider: "goatcounter";
+  /** Counter endpoint, e.g. "https://mysite.goatcounter.com/count" */
+  endpoint: string;
+}
+
+type AnalyticsConfig = GoatCounterConfig;
 
 interface SocialLink {
   /**

@@ -1,0 +1,109 @@
+---
+/**
+ * Comments backed by GitHub Discussions via giscus.
+ *
+ * Renders nothing until `features.comments` carries a real `repoId` and
+ * `categoryId` (generate both on https://giscus.app), so the config can be
+ * committed with placeholders without shipping a broken widget.
+ */
+import { useTranslations } from "@/i18n";
+import { warnOnce } from "@/utils/warnOnce";
+import config from "@/config";
+
+const { comments } = config.features;
+const t = useTranslations(Astro.currentLocale);
+
+const configured = Boolean(comments && comments.repoId && comments.categoryId);
+
+if (comments && !configured) {
+  warnOnce(
+    "[comments] giscus is enabled but repoId/categoryId are empty — " +
+      "comments will not render. Generate them on https://giscus.app and set " +
+      "them in astro-paper.config.ts."
+  );
+}
+
+// Serialised into the loader script below so the attribute list lives in one
+// place rather than being duplicated across markup and the theme-sync handler.
+const options = comments
+  ? {
+      repo: comments.repo,
+      repoId: comments.repoId,
+      category: comments.category,
+      categoryId: comments.categoryId,
+      mapping: comments.mapping ?? "pathname",
+      strict: comments.strict ?? true,
+      reactionsEnabled: comments.reactionsEnabled ?? true,
+      inputPosition: comments.inputPosition ?? "bottom",
+      lightTheme: comments.lightTheme ?? "light",
+      darkTheme: comments.darkTheme ?? "dark",
+      lang: comments.lang ?? Astro.currentLocale ?? config.site.lang,
+    }
+  : null;
+
+// The loader runs on every View Transitions swap (`data-astro-rerun`): each
+// swap brings a fresh, empty `div.giscus` that needs re-initialising.
+const loader = `
+(function () {
+  var o = ${JSON.stringify(options)};
+  var container = document.querySelector("div.giscus");
+  if (!container || container.dataset.loaded) return;
+  container.dataset.loaded = "1";
+
+  var theme = function () {
+    return document.documentElement.getAttribute("data-theme") === "dark"
+      ? o.darkTheme
+      : o.lightTheme;
+  };
+
+  var s = document.createElement("script");
+  s.src = "https://giscus.app/client.js";
+  s.async = true;
+  s.crossOrigin = "anonymous";
+  s.setAttribute("data-repo", o.repo);
+  s.setAttribute("data-repo-id", o.repoId);
+  s.setAttribute("data-category", o.category);
+  s.setAttribute("data-category-id", o.categoryId);
+  s.setAttribute("data-mapping", o.mapping);
+  s.setAttribute("data-strict", o.strict ? "1" : "0");
+  s.setAttribute("data-reactions-enabled", o.reactionsEnabled ? "1" : "0");
+  s.setAttribute("data-emit-metadata", "0");
+  s.setAttribute("data-input-position", o.inputPosition);
+  s.setAttribute("data-theme", theme());
+  s.setAttribute("data-lang", o.lang);
+  s.setAttribute("data-loading", "lazy");
+  container.appendChild(s);
+
+  // giscus renders in a cross-origin iframe and can't read the site's CSS,
+  // so theme changes have to be pushed over postMessage. Bound once, since
+  // this script re-runs per swap and must not stack observers.
+  if (window.__giscusThemeBound) return;
+  window.__giscusThemeBound = true;
+
+  new MutationObserver(function () {
+    var frame = document.querySelector("iframe.giscus-frame");
+    if (!frame) return;
+    frame.contentWindow.postMessage(
+      { giscus: { setConfig: { theme: theme() } } },
+      "https://giscus.app"
+    );
+  }).observe(document.documentElement, { attributeFilter: ["data-theme"] });
+})();
+`;
+---
+
+{
+  configured && (
+    <>
+      {/* Kept inside the guard so an unconfigured build leaves no stray rule. */}
+      <hr class="my-8 border-dashed" />
+      <section data-pagefind-ignore class="mb-8" aria-label={t.post.comments}>
+        <h2 class="text-accent mb-4 text-xl font-semibold">
+          {t.post.comments}
+        </h2>
+        <div class="giscus" />
+        <script is:inline data-astro-rerun set:html={loader} />
+      </section>
+    </>
+  )
+}
