@@ -252,6 +252,7 @@ So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and
 
 Until now, we have assumed that the data required by the FMAs is already available in shared memory. In the next section we will see how this is done.
 
-> Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling reuses each value loaded into registers across a thread's FMAs, cutting shared-memory loads per FMA. Warp tiling arranges lanes so they share values (broadcast), cutting the unique data a warp needs from shared memory per k step. Next, we will look at block tiling, which  reuses each value loaded from global memory across many threads via shared memory, cutting L2/HBM traffic.
+> Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling and warp tiling both protect shared-memory bandwidth, from two sides: register tiling reduces how many values each thread requests per FMA, while warp tiling arranges the lanes so that serving those requests costs fewer wavefronts (via broadcast and conflict-free access). Next, we will look at block tiling, which reuses each global-memory load across the whole CTA through shared memory, cutting L2/HBM traffic.
 
 ## Block Tiling
+
