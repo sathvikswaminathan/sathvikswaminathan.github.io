@@ -188,27 +188,9 @@ If bank conflicts occur, the `LDS` instruction takes longer to deliver all the r
 
 Therefore, the placement of these 32 thread tiles within a warp is critical for minimizing idle slots and increasing issue-slot efficiency.
 
-Now, assume the thread block (CTA) containing this warp computes a `BM × BN` = 128×128 output tile. At 8×8 per thread, the CTA needs `(BM · BN) / (TM · TN) = 16,384 / 64 = 256` threads, or 8 warps. Within a warp, the 32 lanes can be laid out as any `LM × LN` grid with `LM · LN = 32`, which makes the warp responsible for a **warp tile** of `WM = TM · LM` rows by `WN = TN · LN` columns. Each (row, column) position in the `LM × LN` lane grid refers to the `TM × TN` thread tile owned by a single lane.
+Now, assume the thread block (CTA) containing this warp computes a `BM × BN` = 128×128 output tile. At 8×8 per thread, the CTA needs `(BM · BN) / (TM · TN) = 16,384 / 64 = 256` threads, or 8 warps. Within a warp, the 32 lanes can be laid out as any `LM × LN` grid with `LM · LN = 32`, which makes the warp responsible for a **warp tile** of `WM = TM · LM` rows by `WN = TN · LN` columns. Each (row, column) position in the `LM × LN` lane grid refers to the `TM x TN` /  `8x8` thread tile owned by a single lane.
 
-To see what the lane grid actually buys us, follow a single `k` step. The lane at position `(i, j)` of the `LM × LN` grid owns the thread tile sitting at row block `i`, column block `j` of the warp tile, so in that `k` step it needs
-
-- the `TM` = 8 values of `A` belonging to rows `[TM·i, TM·i + TM)`, and
-- the `TN` = 8 values of `B` belonging to columns `[TN·j, TN·j + TN)`.
-
-The row index `i` does not depend on `j`, and the column index `j` does not depend on `i`. So **every lane in the same row of the lane grid asks for exactly the same `TM` values of `A`**, and **every lane in the same column asks for exactly the same `TN` values of `B`**. Those repeats are not extra work for shared memory: when several lanes in a warp request the same address, the bank reads the word once and broadcasts it to all of them in the same cycle.
-
-So the warp issues `32 × (TM + TN) = 512` operand requests per `k` step regardless of the layout, but they collapse into far fewer distinct addresses — one group of `TM` values of `A` per lane-grid row and one group of `TN` values of `B` per lane-grid column:
-
-$$
-\underbrace{T_M \cdot L_M}_{W_M} \;+\; \underbrace{T_N \cdot L_N}_{W_N}
-\;=\; \text{distinct floats pulled out of SMEM per } k \text{ step}
-$$
-
-![Two lane grids side by side. In the 4x8 grid, the 8 lanes of a row all share one group of 8 A values and the 4 lanes of a column share one group of 8 B values, collapsing 512 requests into 32 + 64 = 96 distinct floats. In the 2x16 grid, A is broadcast 16 ways but B only 2 ways, collapsing the same 512 requests into just 16 + 128 = 144 distinct floats](./warp-broadcast.png)
-
-Both arrangements above issue the same 512 requests and perform the same `32 × TM × TN = 2048` FMAs. What differs is how the broadcast factor is split between the two operands. A `4×8` grid broadcasts `A` 8 ways and `B` 4 ways; a `2×16` grid broadcasts `A` 16 ways but `B` only 2 ways, and that lopsided reuse on `B` is what inflates the total from 96 distinct floats to 144.
-
-Since the compute per `k` step is fixed, the only thing the lane layout changes is how much data has to come out of shared memory:
+Below are different possible arrangements of `LM x LN`
 
 | Lane grid `LM × LN` | Warp tile `WM × WN` | Unique `A` (= `WM`) | Unique `B` (= `WN`) | Total unique floats (Unique `A` + Unique `B`) | FMAs per float |
 |---|---|---|---|---|---|
