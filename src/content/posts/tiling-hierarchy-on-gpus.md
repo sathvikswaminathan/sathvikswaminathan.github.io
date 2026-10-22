@@ -203,7 +203,7 @@ Below are different possible arrangements of `LM x LN`
 
 The `1×32` and `32×1` lane grids are not possible because the warp tile would be 8×256 or 256×8, and its 256-wide dimension exceeds the 128×128 CTA tile (`WN > BN` or `WM > BM`).
 
-![...](./warp-shape.png)
+![The six lane grids drawn against the 128 by 128 CTA tile. Every arrangement issues the same 512 operand requests per k step, but the warp tile it implies changes how many of those addresses are distinct: 1 by 32 and 32 by 1 need a 256-wide warp tile and do not fit in the CTA at all, 2 by 16 and 16 by 2 pull 144 distinct floats, and the squarest feasible grids, 4 by 8 and 8 by 4, pull only 96](./warp-shape.png)
 
 Among the remaining grids, `4×8` and `8×4` result in the fewest unique floats, allowing data to be broadcast while serving an `LDS` request from shared memory. Both also divide the CTA evenly: a 32×64 warp tile gives a 4×2 arrangement of the 8 warps, and a 64×32 warp tile gives a 2×4 arrangement.
 
