@@ -51,7 +51,7 @@ export default defineAstroPaperConfig({
     // Analytics stays off until the endpoint is filled in.
     analytics: {
       provider: "goatcounter",
-      endpoint: "",
+      endpoint: "https://sathvik.goatcounter.com/count",
     },
   },
   socials: [
