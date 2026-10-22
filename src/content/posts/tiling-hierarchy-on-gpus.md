@@ -250,3 +250,8 @@ While 8×16 slightly raises the efficiency ceiling, it does so at the cost of ha
 
 So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and libraries often autotune tile sizes for each GPU and problem shape. For the rest of this blog, we will assume a thread tile size of 8x8.
 
+Until now, we have assumed that the data required by the FMAs is already available in shared memory. In the next section we will see how this is done.
+
+> Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling reuses each value loaded into registers across a thread's FMAs, cutting shared-memory loads per FMA. Warp tiling arranges lanes so they share values (broadcast), cutting the unique data a warp needs from shared memory per k step. Next, we will look at block tiling, which  reuses each value loaded from global memory across many threads via shared memory, cutting L2/HBM traffic.
+
+## Block Tiling
