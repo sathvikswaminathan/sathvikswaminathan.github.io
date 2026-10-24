@@ -13,7 +13,7 @@ description: GPUs are equipped with a tremendous amount of compute and a tiered 
 
 Matrix multiplication, the workload that dominates GPU time in deep learning, will run much slower than what the hardware is actually capable of when written in the straightforward way. This is not because the GPU lacks compute cores; rather, the compute cores remain idle while waiting for data to arrive.
 
-GPUs have a tiered memory hierarchy, with each level being larger but slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
+GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
 
 Throughout this post we will consider an FP32 matrix multiply `C = A × B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`, with `M = N = K = 4096`.
 
@@ -256,3 +256,160 @@ Until now, we have assumed that the data required by the FMAs is already availab
 
 ## Block Tiling
 
+All the warps in an SM load their inputs from shared memory. At each `k` step, a single warp loads `WM` entries of the `k`-th column of `A` and `WN` entries of the `k`-th row of `B`. That is `WM + WN` floats per warp loaded from shared memory, and the SM hosts more than a single warp to hide latency. These values need to be staged into shared memory from global memory by the CTA before its warps can access them.
+
+Let's say a CTA is responsible for computing a `BM × BN` tile of the output matrix `C`. This means that at each `k` step, the CTA loads `BM` entries of column `k` of `A` and `BN` entries of row `k` of `B` from global memory into shared memory.
+
+All the threads in this CTA then perform the outer product, loading `BM + BN` floats and computing `BM · BN` FMAs. Since every FMA is `2 FLOPs` and every float is `4 bytes`, this results in an AI of
+
+$$
+\text{AI} = \frac{2 \cdot BM \cdot BN}{4 \cdot (BM + BN)} = \frac{BM \cdot BN}{2 \cdot (BM + BN)} \ \text{FLOPs per byte}
+$$
+
+Since shared memory is limited, `BM + BN` has to stay within a budget. Under this constraint, the AI is maximized when `BM = BN = B`, resulting in an AI of `B / 4` FLOPs per byte.
+
+> The threads in a CTA can choose to load `BM` entries of `A` and `BN` entries of `B` across multiple `k` steps, say `BK`. However, this does not affect the AI, since the FLOPs performed would be `BK` times higher and the floats loaded would also be `BK` times higher, canceling out in the AI equation. What this does achieve is fewer trips to GMEM, at the cost of a higher shared memory footprint. SMEM per CTA would then be `BK · (BM + BN) · 4` bytes, and double that if double buffering is involved.
+
+With block tiling in place, the three tiling levels stack into one picture. A CTA owns a 128×128 tile of `C`, and to compute it, it walks the `k` axis staging a 128×8 slab of `A` and an 8×128 slab of `B` in shared memory at each step. Those slabs are then split among its 8 warps, and each warp's 32 lanes pull 8 values of `A` and 8 values of `B` out of them into registers:
+
+![The same GEMM at three zoom levels. In global memory, one CTA tile is a single 128 by 128 square out of the 32 by 32 grid of tiles in C, fed by a 128-row panel of A and a 128-column panel of B. In shared memory, one k step of that CTA is a 128 by 8 slab of A and an 8 by 128 slab of B, 8 KB per k tile, split across 8 warps of 32 by 64. In registers, one lane of one warp holds 8 values of A, 8 values of B and 64 accumulators. Each float staged in shared memory feeds 128 FMAs in the CTA; each float loaded into a register feeds 8 FMAs in the lane](./tiling-hierarchy.png)
+
+### Block tile dimension
+
+#### Lower Limit for B
+
+The lower limit for `B` is set by the condition that GMEM does not become the bottleneck. To be conservative, we assume that L2 does not help, and every byte loaded by a CTA comes from HBM.
+
+The documented boost clock of the H100 SXM is 1.98 GHz, resulting in a peak throughput of `67 TFLOPs/sec`. HBM3 supports a bandwidth of `3.35 TB/sec`.
+
+> However, the sustained clock rate is about 1.75 GHz to keep power consumption in check under dense FP32 workloads, resulting in a peak throughput of about `59 TFLOPs/sec`. This lowers the required AI to about `17.6 FLOPs per byte`. On the other hand, the achievable HBM bandwidth is also lower than `3.35 TB/sec`, which pushes it back up. We will use `20 FLOPs per byte` as a slightly conservative target.
+
+To prevent HBM transfers from being the bottleneck, we need a minimum AI of
+
+$$
+\frac{67 \ \text{TFLOPs/sec}}{3.35 \ \text{TB/sec}} = 20 \ \text{FLOPs per byte}
+$$
+
+$$
+\implies \frac{B}{4} \geq 20 \implies B \geq 80
+$$
+
+For a square block tile, `B` must be at least `80`.
+
+#### Upper Limit for B
+
+Big tile sizes require more threads, and every thread requires registers for its accumulators, inputs and other bookkeeping.
+
+As we saw earlier, a thread with an `8×8` thread tile requires about `128` registers and produces `64` outputs. A CTA with a `B×B` block tile produces `B²` outputs. Therefore,
+
+$$
+\text{threads per CTA} = \frac{B^2}{64}
+$$
+
+$$
+\text{registers per CTA} = \frac{B^2}{64} \times 128 = 2B^2
+$$
+
+An H100 SM has `65,536` registers, and the whole CTA must fit on a single SM. Therefore,
+
+$$
+2B^2 \leq 65{,}536 \implies B \leq \sqrt{32{,}768} \approx 181
+$$
+
+So for square block tiles, the final inequality becomes
+
+$$
+80 \leq B \leq 181
+$$
+
+`B` also needs to divide evenly into warp tiles of `32×64`, and powers of two keep the index math to shifts and masks. The only power of two in this range is `128`.
+
+#### Candidates
+
+Here is how the different block tile sizes compare against the `20 FLOPs per byte` target:
+
+| CTA tile  | FLOPs/byte | vs. 20 | Verdict                                         |
+|-----------|-----------:|-------:|-------------------------------------------------|
+| 32×32     | 8.0        | 0.40×  | HBM-bound                                       |
+| 64×64     | 16.0       | 0.80×  | HBM-bound without L2 help                       |
+| 64×128    | 21.3       | 1.07×  | nominally clears, no margin                     |
+| 96×128    | 27.4       | 1.37×  | clears; awkward warp decomposition              |
+| **128×128** | **32.0** | **1.60×** | **clears, with headroom**                    |
+| 256×128   | 42.7       | 2.13×  | more margin, at a price (only 1 CTA per SM)     |
+| 256×256   | 64.0       | 3.20×  | cannot launch (exceeds the register file)       |
+
+Keep in mind that this assumes every byte comes from HBM. In practice, CTAs that share rows of `A` or columns of `B` get some of their data from L2, which lowers the HBM traffic further.
+
+![Arithmetic intensity grows as B over 4 with the square block tile side. Below B equals 80 the tile sits under the 20 FLOPs per byte line and the cores wait on global memory; above B equals 181 the CTA needs more than the 65,536 registers of an SM and cannot be resident; 128 is the only power of two inside that window, landing at 32 FLOPs per byte. The ladder of candidate CTA tiles alongside shows 32 by 32 and 64 by 64 falling short of the target, 64 by 128 clearing it with no margin, and 128 by 128 and 256 by 128 clearing it with headroom](./block-tile-bounds.png)
+
+#### Is 128×128 the best we can do?
+
+The square tile argument assumed that shared memory was the budget. So let's check how much shared memory a `128×128` block tile actually uses. With `BK = 8` and double buffering:
+
+$$
+2 \times 8 \times (128 + 128) \times 4 \ \text{bytes} = 16 \ \text{KB per CTA}
+$$
+
+The register file allows `2` such CTAs per SM, so together they use `32 KB` out of the `228 KB` of shared memory available on an H100 SM. Even with `BK = 32`, each CTA uses only `64 KB`, or `128 KB` for two. Most of the shared memory is left unused.
+
+The budget that actually limits us is the register file. The register file limits the *area* of the tile, `BM · BN` (the accumulators), and not `BM + BN`. For a fixed area, a square tile still has the highest AI, but nothing forces us to keep the area fixed. Let's look at bigger tiles: `256×128` and `256×256`.
+
+##### 256×256
+
+Plugging `BM = BN = 256` into the formulas above,
+
+$$
+\text{threads per CTA} = \frac{256 \times 256}{64} = 1024
+$$
+
+$$
+\text{registers per CTA} = 1024 \times 128 = 131{,}072
+$$
+
+This is twice the size of the SM's register file.
+
+##### 256×128
+
+Plugging `BM = 256` and `BN = 128` into the formulas,
+
+$$
+\text{threads per CTA} = \frac{256 \times 128}{64} = 512
+$$
+
+$$
+\text{registers per CTA} = 512 \times 128 = 65{,}536
+$$
+
+This uses exactly the whole register file. The CTA fits, but there is no room for a second CTA on the same SM. Its 16 warps are arranged as `8×2` warp tiles of `32×64`, and it uses only `2 × 8 × (256 + 128) × 4 bytes = 24 KB` of shared memory.
+
+| Configuration | Threads/CTA | Regs/CTA | CTAs/SM | Warps/SM | Warps/SMSP | SMEM/SM | AI (FLOPs/byte) | HBM traffic (4096³) |
+|---------------|------------:|---------:|--------:|---------:|-----------:|--------:|----------------:|--------------------:|
+| 128×128       | 256         | 32,768   | 2       | 16       | 4          | 32 KB   | 32.0            | 4.29 GB             |
+| 256×128       | 512         | 65,536   | 1       | 16       | 4          | 24 KB   | 42.7            | 3.22 GB             |
+| 256×256       | 1024        | 131,072  | 0 ✗     | —        | —          | —       | 64.0            | —                   |
+
+Notice that both configurations have the same number of warps per SM, and therefore the same `4` warps per SMSP for the warp scheduler to choose from. The difference is that with `128×128`, those warps belong to two independent CTAs, while with `256×128` they all belong to one.
+
+#### One Big CTA or Two Small Ones?
+
+The warps in a CTA are tied together by `__syncthreads`. This is where having two CTAs per SM helps:
+
+- **Barriers:** With two `128×128` CTAs, a `__syncthreads` stalls only the 8 warps of its own CTA. While they wait for the slowest warp, or for a global load that was not fully hidden, the 8 warps of the other CTA can keep issuing FFMAs. With a single `256×128` CTA, all 16 warps wait at the same barrier at every `k` tile, and the slowest warp holds up the whole SM.
+- **Prologue and epilogue:** Every CTA starts by loading its first tile, with no compute to overlap it with, and ends by writing its output tile to `C`. With two CTAs per SM, one CTA is usually computing while the other is starting or finishing. With one CTA per SM, the SM sits idle during every prologue and epilogue.
+- **Small problems:** Bigger tiles mean fewer CTAs. For a `1024×1024×1024` matrix multiply, `128×128` results in 64 CTAs, while `256×128` results in only 32 CTAs for 132 SMs.
+
+![Schematic SM timelines for the two configurations. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue](./one-cta-vs-two.png)
+
+So when would `256×128` be worth giving up the second CTA? Only when the `20 FLOPs per byte` target no longer holds, which can happen in two ways:
+
+- **The GEMM gets less HBM bandwidth than we assumed.** The target assumes the kernel has all `3.35 TB/sec` to itself. If other kernels run at the same time, the GEMM's share can drop below the `2.1 TB/sec` that `128×128` needs. `256×128` needs only `1.6 TB/sec`
+
+- **The compute rate is much higher.** On the same H100, FP16 tensor cores deliver about `989 TFLOPs/sec`, which raises the target to about `300 FLOPs per byte`. No block tile reaches that from HBM alone, so tensor-core kernels rely on L2 reuse and use the biggest tiles that fit, typically `128×256` or `256×128`.
+
+Neither applies to our FP32 GEMM, so for the rest of this blog we will assume a block tile size of `128×128`.
+
+> Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be, and on an H100 the register file runs out first. Within this budget, `128×128` already clears the HBM target with room to spare, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
+
+### Padding
+
+### Swizzling
