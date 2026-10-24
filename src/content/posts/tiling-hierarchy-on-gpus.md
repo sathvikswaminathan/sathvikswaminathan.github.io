@@ -270,10 +270,6 @@ Since shared memory is limited, `BM + BN` has to stay within a budget. Under thi
 
 > The threads in a CTA can choose to load `BM` entries of `A` and `BN` entries of `B` across multiple `k` steps, say `BK`. However, this does not affect the AI, since the FLOPs performed would be `BK` times higher and the floats loaded would also be `BK` times higher, canceling out in the AI equation. What this does achieve is fewer trips to GMEM, at the cost of a higher shared memory footprint. SMEM per CTA would then be `BK · (BM + BN) · 4` bytes, and double that if double buffering is involved.
 
-With block tiling in place, the three tiling levels stack into one picture. A CTA owns a 128×128 tile of `C`, and to compute it, it walks the `k` axis staging a 128×8 slab of `A` and an 8×128 slab of `B` in shared memory at each step. Those slabs are then split among its 8 warps, and each warp's 32 lanes pull 8 values of `A` and 8 values of `B` out of them into registers:
-
-![The same GEMM at three zoom levels. In global memory, one CTA tile is a single 128 by 128 square out of the 32 by 32 grid of tiles in C, fed by a 128-row panel of A and a 128-column panel of B. In shared memory, one k step of that CTA is a 128 by 8 slab of A and an 8 by 128 slab of B, 8 KB per k tile, split across 8 warps of 32 by 64. In registers, one lane of one warp holds 8 values of A, 8 values of B and 64 accumulators. Each float staged in shared memory feeds 128 FMAs in the CTA; each float loaded into a register feeds 8 FMAs in the lane](./tiling-hierarchy.png)
-
 ### Block tile dimension
 
 #### Lower Limit for B
