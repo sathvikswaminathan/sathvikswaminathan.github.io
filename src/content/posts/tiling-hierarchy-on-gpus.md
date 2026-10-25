@@ -13,15 +13,37 @@ description: GPUs are equipped with a tremendous amount of compute and a tiered 
 
 Matrix multiplication, the workload that dominates GPU time in deep learning, will run much slower than what the hardware is actually capable of when written in the straightforward way. This is not because the GPU lacks compute cores; rather, the compute cores remain idle while waiting for data to arrive.
 
-GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (HBM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
+GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory/L1 cache, L2 cache, and global memory (DRAM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
+
+This blog post explores various optimization techniques and walks through the reasoning behind tile-size selection on the NVIDIA Tesla T4 GPU. It also includes calculations for the H100 to illustrate why different GPUs favor different tile sizes.
+
+Note: We will not consider tensor cores in this discussion; the focus is solely on CUDA-core-based kernel development.
 
 Throughout this post we will consider an FP32 matrix multiply `C = A × B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`, with `M = N = K = 4096`.
+
+Here are the numbers for both GPUs that we will keep coming back to:
+
+| | T4 | H100 SXM |
+|---|---|---|
+| Architecture | Turing | Hopper |
+| SMs | 40 | 132 |
+| FP32 CUDA cores per SMSP | 16 | 32 |
+| FP32 FMAs per SM per cycle | 64 | 128 |
+| Boost clock | 1.59 GHz | 1.98 GHz |
+| Peak FP32 throughput | 8.1 TFLOPs/sec | 67 TFLOPs/sec |
+| DRAM | 16 GB GDDR6, 320 GB/sec | 80 GB HBM3, 3.35 TB/sec |
+| L2 cache | 4 MB | 50 MB |
+| Registers per SM | 65,536 | 65,536 |
+| Max shared memory per SM | 64 KB | 228 KB |
+| Shared memory bandwidth per SM | ~64 bytes/cycle | ~128 bytes/cycle |
+| Shared memory load latency | ~22 cycles | ~30 cycles |
+| Max threads per SM | 1024 | 2048 |
 
 ## Table of contents
 
 ## Where the FLOPs come from
 
-Every SM is divided into 4 subpartitions known as SMSPs. Each SMSP has a warp scheduler which can issue one warp-wide instruction every cycle. A warp comprises 32 threads, and every thread's position in a warp is referred to as its lane (`0–31`). Each SMSP is also equipped with CUDA cores. On an H100, each SMSP hosts 32 FP32 CUDA cores; the A100 SMSP hosts 16 FP32 CUDA cores. The core count per SMSP is what decides how long a warp occupies the cores. Since a warp issues 32 FMAs per instruction, the H100's 32 FP32 cores retire a warp-wide FMA in a single cycle, matching the scheduler's issue rate. The A100's 16 cores need two cycles per warp, so its scheduler can only issue an FP32 FMA every other cycle and has to find other work, or run another warp, to fill the gap.
+Every SM is divided into 4 subpartitions known as SMSPs. Each SMSP has a warp scheduler which can issue one warp-wide instruction every cycle. A warp comprises 32 threads, and every thread's position in a warp is referred to as its lane (`0–31`). Each SMSP is also equipped with CUDA cores. On an H100, each SMSP hosts 32 FP32 CUDA cores; the T4 SMSP hosts 16 FP32 CUDA cores. The core count per SMSP is what decides how long a warp occupies the cores. Since a warp issues 32 FMAs per instruction, the H100's 32 FP32 cores retire a warp-wide FMA in a single cycle, matching the scheduler's issue rate. The T4's 16 cores need two cycles per warp, so its scheduler can only issue an FP32 FMA every other cycle and has to find other work, or run another warp, to fill the gap.
 
 Each FP32 CUDA core can execute the FMA (fused multiply-add) instruction:
 
@@ -29,7 +51,11 @@ Each FP32 CUDA core can execute the FMA (fused multiply-add) instruction:
 c = a * b + c
 ```
 
-Essentially, every FMA results in `2 FLOPs` — one multiplication and one addition. The CUDA cores are pipelined, allowing every SMSP to perform `2 FLOPs` per cycle per core, resulting in a peak throughput of `2 FLOPs × 32 = 64 FLOPs` per cycle. The whole SM can sustain a peak throughput of `4 × 64 FLOPs = 256 FLOPs`, or `128 FMAs`, per cycle.
+Essentially, every FMA results in `2 FLOPs` — one multiplication and one addition. The CUDA cores are pipelined, allowing every core to perform `2 FLOPs` per cycle.
+
+On the T4, every SMSP has a peak throughput of `2 FLOPs × 16 = 32 FLOPs` per cycle. The whole SM can sustain a peak throughput of `4 × 32 FLOPs = 128 FLOPs`, or `64 FMAs`, per cycle.
+
+On an H100, every SMSP has a peak throughput of `2 FLOPs × 32 = 64 FLOPs` per cycle, and the whole SM can sustain `4 × 64 FLOPs = 256 FLOPs`, or `128 FMAs`, per cycle.
 
 ## Arithmetic Intensity of Matrix Multiplication
 
@@ -85,7 +111,11 @@ How much AI does it take to saturate the CUDA cores?
 
 As we will see later, CUDA threads load data from GMEM into SMEM, so every load into the register file is served by shared memory.
 
-On an H100, an SM sustains a peak throughput of `128` FMAs per cycle, and each FMA needs `2` FP32 operands. For a lane to issue an FMA in the next cycle, its operands must already be sitting in registers. But the SM's shared-memory pipe only delivers about `128 bytes` (`32` FP32 values) per cycle into the register file. If every FMA used unique operands, the SM would need `128 × 2 = 256` FP32 values every cycle. Those `32` loaded values must therefore be shared across all `128` FMAs, which pins the required arithmetic intensity at `128 FMAs / 32 loads = 4 FMAs` per load.
+On the T4, an SM sustains a peak throughput of `64` FMAs per cycle, and each FMA needs `2` FP32 operands. For a lane to issue an FMA, its operands must already be sitting in registers. But the T4 has only 4 load/store units per SMSP (half of what Volta has), and its shared-memory pipe delivers only about `64 bytes` (`16` FP32 values) per cycle into the register file. If every FMA used unique operands, the SM would need `64 × 2 = 128` FP32 values every cycle. Those `16` loaded values must therefore be shared across all `64` FMAs, which pins the required arithmetic intensity at `64 FMAs / 16 loads = 4 FMAs` per load.
+
+On an H100, an SM sustains `128` FMAs per cycle, which would need `128 × 2 = 256` FP32 values every cycle if there was no reuse. Its shared-memory pipe delivers about `128 bytes` (`32` FP32 values) per cycle, which pins the required arithmetic intensity at `128 FMAs / 32 loads = 4 FMAs` per load.
+
+Interestingly, both GPUs land on the same number. The T4 has half the FP32 cores per SM, but it also has half the shared-memory bandwidth, so the ratio between the two stays the same.
 
 ![Without reuse, 32 loaded FP32 values feed only 16 FMAs and 112 of the SM's 128 lanes sit idle; with each loaded value feeding 4 FMAs, all 128 lanes stay busy](./required-arithmetic-intensity.png)
 
@@ -95,9 +125,9 @@ Therefore, for the outer product to sustain the SM's peak throughput,
 
 `m / 2 = 4` → `m = 8`.
 
-This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit.
+This means every thread must load at least `8` values of `A` and `8` values of `B` into its registers and compute an `8×8` output tile. The register budget for this is `2m = 16` registers for the inputs plus `m² = 64` registers for the accumulators — `80` registers per thread. This is well under the 255-register-per-thread limit, which is the same on both the T4 and the H100.
 
-Every thread is now repsonsible for computing a `8x8` tile of the output matrix. This is referred to as a **thread tile (TM, TN)** (or a lane tile) and this technique is referred to as **register tiling**. 
+Every thread is now responsible for computing an `8x8` tile of the output matrix. This is referred to as a **thread tile (TM, TN)** (or a lane tile) and this technique is referred to as **register tiling**. 
 
 Here is what the kernel looks like from a single thread's perspective:
 
@@ -111,18 +141,22 @@ for k:
 
 ## Issue Slot Efficiency
 
-The previous section went over how to load data into registers to hit an SM's peak compute throughput. That only matters, however, if the warp scheduler actually has an FMA to issue in every cycle; if it does not, register tiling does not matter. There are two reasons an FMA may not be issued in a given issue slot:
+The previous section went over how to load data into registers to hit an SM's peak compute throughput. That only matters, however, if the warp scheduler actually has an FMA to issue whenever the FMA pipe is free; if it does not, register tiling does not matter. There are two reasons an FMA may not be issued in a given issue slot:
 
 | Issue slot | What happens in that cycle | Example causes |
 | --- | --- | --- |
 | Overhead slot | Something issued, but it wasn't an FFMA | `LDS`, address math, loop branch, `__syncthreads` |
 | Idle slot | Nothing issued: every warp on the SMSP is stalled | Waiting for a load to return, shared-memory pipe congested, barrier |
 
-It is therefore useful to quantify the fraction of issue slots that actually carry an FMA, since that is the metric we want to maximize:
+It is therefore useful to quantify the fraction of FMA issue opportunities that actually carry an FMA, since that is the metric we want to maximize:
 
 ```text
-issue-slot efficiency η = cycles that issued an FMA / total cycles
+issue-slot efficiency η = FFMAs issued / FFMAs that could have been issued
 ```
+
+On an H100, an FFMA can be issued every cycle, so this is simply the fraction of cycles that issued an FMA. On the T4, an FFMA can only be issued every other cycle, so the most it can issue in `N` cycles is `N / 2`. Normalizing this way puts both GPUs on the same scale, where `100%` means the FMA pipe is never left waiting.
+
+This difference has an important consequence. On an H100, every overhead slot is a cycle that could have issued an FFMA. On the T4, the scheduler has a free issue slot every other cycle while the FMA pipe is still busy with the previous warp-wide FFMA. Overhead instructions such as `LDS`, branches, and integer address math (Turing has separate INT32 cores for this) can be issued in those free slots without taking anything away from the FMAs.
 
 Overhead slots cannot be eliminated entirely: every thread still has to load its operands, compute addresses, advance the loop, and synchronize with its peers. Their cost can only be amortized by doing more compute per overhead instruction, which is exactly what a larger thread tile gives us.
 
@@ -138,7 +172,19 @@ for k:
     64 FFMAs using a, b          // must wait for the loads        
 ```
 
-On an H100, a shared-memory load (`LDS`) takes about 30 clock cycles when there are no bank conflicts. Tracing one `k` step through the scheduler:
+On the T4, a shared-memory load (`LDS`) takes about 22 clock cycles when there are no bank conflicts. Tracing one `k` step through the scheduler:
+
+```text
+cycle   0-15  : issue 16 LDS                          (16 overhead slots)
+cycle  16-29  : nothing to issue: the first FFMA needs
+                a0 and b0, and b0 (issued at cycle 8)
+                comes back at ~30                     (~14 idle slots)
+cycle  30-157 : 64 FFMAs, one every other cycle       (128 cycles of FMA work)
+-------------------------------------------------------------
+~158 cycles for 64 FFMAs (128 at peak)  ->  η ≈ 81%
+```
+
+On an H100, an `LDS` takes about 30 clock cycles, and one `k` step looks like this:
 
 ```text
 cycle   0-15  : issue 16 LDS                          (16 overhead slots)
@@ -150,13 +196,13 @@ cycle  38-101 : 64 FFMAs                              (64 useful slots)
 ~102 cycles for 64 FFMAs  ->  η ≈ 63%
 ```
 
-The CUDA cores are idle during the 22 idle slots, waiting for the data to be loaded.
+The CUDA cores are idle during these idle slots, waiting for the data to be loaded. The T4 loses fewer cycles here for two reasons: its `LDS` latency is lower, and every `k` step takes twice as many cycles of FMA work, so the same 16 `LDS` instructions are a smaller fraction of the total.
 
-Register prefetching removes them.
+Register prefetching removes the idle slots.
 
 #### Register prefetching
 
-The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. Those loads take `16 + 30 = 46` cycles to land, while the 64 FMAs of step `k` take 64 cycles, so the memory load latency of step `k+1` is completely overlapped with  the compute of step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then immediately issues the FMAs.
+The idea is to issue the `LDS` instructions for step `k+1` *before* running the FMAs for step `k`. When the loop reaches step `k+1`, its operands are already sitting in registers: the scheduler issues the `LDS` for step `k+2` and then immediately issues the FMAs.
 
 ```c
 load a_next, b_next for k = 0
@@ -166,7 +212,19 @@ for k:
     64 FFMAs using a, b               
 ```
 
-Scheduler trace during step k:
+On the T4, the 64 FMAs of step `k` take 128 cycles. The 16 `LDS` instructions for step `k+1` slip into the free issue slots between the FFMAs and land within about `31 + 22 = 53` cycles, so the memory load latency of step `k+1` is completely overlapped with the compute of step `k`.
+
+Scheduler trace during step k on the T4:
+
+```text
+cycle   0-127 : 64 FFMAs for step k, on even cycles   (useful)
+cycle   1-31  : 16 LDS for k+1, on odd cycles         (overhead, but in free slots)
+                k+1's loads are back by ~53, well before cycle 128
+-------------------------------------------------------------
+128 cycles for 64 FFMAs  ->  η = 100%
+```
+
+On an H100, the 16 `LDS` instructions take up their own issue slots and land within `16 + 30 = 46` cycles, while the 64 FMAs of step `k` take 64 cycles:
 
 ```text
 cycle  0-15 : issue 16 LDS for k+1      (overhead)
@@ -176,7 +234,9 @@ cycle 16-79 : 64 FFMAs for step k       (useful)
 80 cycles for 64 FFMAs  ->  η = 80%
 ```
 
-Register prefetching raises η from ~63% to 80%. However, this comes at a cost. Each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching, increasing the register budget from 80 to 96 registers per thread. This is referred to as **register double buffering**.
+Register prefetching raises η from ~81% to 100% on the T4, and from ~63% to 80% on the H100. This does not mean the T4 kernel will hit peak throughput: the trace only follows a single warp, and assumes the shared-memory pipe can keep up with all the warps on the SM, which, as we saw in register tiling, it only just can with an `8×8` tile.
+
+Prefetching also comes at a cost. Each thread must now hold two sets of operands at once — the one it is computing with and the one it is prefetching, increasing the register budget from 80 to 96 registers per thread. This is referred to as **register double buffering**.
 
 These `LDS` instructions are issued as a warp-wide load instruction by the whole warp to shared memory. They carry addresses requested by all 32 threads, each of which is loading data for its `8×8` tile. The effective bandwidth with which SMEM delivers this data to the warp depends on which tiles the 32 threads are trying to compute. If they are grouped such that the `LDS` leads to a lot of bank conflicts, that would again lead to idle slots, as the `LDS` for step k + 1 can take longer than the compute in step `k`. This is what warp tiling addresses.
 
@@ -184,7 +244,7 @@ These `LDS` instructions are issued as a warp-wide load instruction by the whole
 
 Every one of the 32 threads in a warp computes a `TM × TN` = 8×8 thread tile of the output. A warp therefore computes 32 such thread tiles. How these 32 tiles are arranged within the output matrix determines which addresses are grouped into a warp's `LDS` instruction. This, in turn, determines whether the instruction is serviced by shared memory with bank conflicts, can take advantage of broadcasts, and so on.
 
-If bank conflicts occur, the `LDS` instruction takes longer to deliver all the required data, resulting in idle slots. On the other hand, if there are no bank conflicts and the data is shared across threads such that it can be broadcast, `LDS` can deliver the data much more efficiently and its latency can often be overlapped with compute.
+If bank conflicts occur, the `LDS` instruction takes longer to deliver all the required data, resulting in idle slots. On the other hand, if there are no bank conflicts and the data is shared across threads such that it can be broadcast, `LDS` can deliver the data much more efficiently and its latency can often be overlapped with compute. Both the T4 and the H100 have 32 shared-memory banks, each 4 bytes wide, so the analysis below holds for both.
 
 Therefore, the placement of these 32 thread tiles within a warp is critical for minimizing idle slots and increasing issue-slot efficiency.
 
@@ -215,18 +275,22 @@ The warp tile is the union of all 32 thread tiles assigned to a warp. Its dimens
 
 ### Reducing Overhead Slots
 
-Why stop at a thread tile size of 8×8? With register prefetching, an m×n tile needs at least m·n + 2(m + n) registers: m·n accumulators, plus two sets of m + n operands. On top of that come ~20–30 registers for addresses, loop counters and indices, and the hardware limit is 255 registers per thread. An 8×16 tile would need 176 registers before this overhead, still under the limit. A bigger tile has a higher arithmetic intensity, meaning we perform more FMAs per `LDS` instruction. Fewer issue slots are then used up by `LDS`, which improves the issue-slot efficiency.
+Why stop at a thread tile size of 8×8? With register prefetching, an m×n tile needs at least m·n + 2(m + n) registers: m·n accumulators, plus two sets of m + n operands. On top of that come ~20–30 registers for addresses, loop counters and indices, and the hardware limit is 255 registers per thread. An 8×16 tile would need 176 registers before this overhead, still under the limit. A bigger tile has a higher arithmetic intensity, meaning we perform more FMAs per `LDS` instruction.
 
-| Tile | FFMAs / k | LDS / k | Ceiling η | Registers (acc + 2× operands) |
-|---|---|---|---|---|
-| 4×4 | 16 | 8 | 67% | 16 + 16 = 32 |
-| 8×8 | 64 | 16 | 80% | 64 + 32 = 96 |
-| 8×16 | 128 | 24 | 84% | 128 + 48 = 176 |
-| 16×16 | 256 | 32 | 89% | 256 + 64 = 320 > 255 ✗ |
+On an H100, fewer issue slots are then used up by `LDS`, which improves the issue-slot efficiency. On the T4, the `LDS` instructions already fit in the free slots between the FFMAs, as long as there are fewer `LDS` than FFMAs. Every tile below satisfies this, so the T4's ceiling is 100% for all of them.
+
+| Tile | FFMAs / k | LDS / k | Ceiling η (T4) | Ceiling η (H100) | Registers (acc + 2× operands) |
+|---|---|---|---|---|---|
+| 4×4 | 16 | 8 | 100% | 67% | 16 + 16 = 32 |
+| 8×8 | 64 | 16 | 100% | 80% | 64 + 32 = 96 |
+| 8×16 | 128 | 24 | 100% | 84% | 128 + 48 = 176 |
+| 16×16 | 256 | 32 | 100% | 89% | 256 + 64 = 320 > 255 ✗ |
+
+So why not just use `4×4` on the T4? Because the issue slots are not the only constraint. As we saw in register tiling, the T4's shared memory can only keep up with the FMAs if every loaded value feeds at least `4` FMAs. A `4×4` tile only gives `2`, so the cores would wait on shared memory half the time. An `8×8` tile gives exactly `4`, which keeps the shared-memory pipe fully busy with no slack. An `8×16` tile gives `128 / 24 = 5.3` FMAs per load, leaving about 25% of the shared-memory bandwidth free for bank conflicts and for the stores that stage data into shared memory.
 
 ![Registers per thread grow with the tile area, from 32 at 4 by 4 to 320 at 16 by 16, which overshoots the 255 register limit and spills to local memory, while the issue-slot efficiency ceiling it buys flattens from 67% to 80% to 84%](./tile-size-tradeoff.png)
 
-Moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4%, while consuming 80 more registers per thread. A 16×16 tile doesn't fit at all: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
+On an H100, moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4%, while consuming 80 more registers per thread. On the T4, it buys some shared-memory headroom, but nothing in terms of issue slots. A 16×16 tile doesn't fit on either GPU: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
 
 - `STL` (store local) when the value is evicted
 - `LDL` (load local) when it is needed again
@@ -237,14 +301,16 @@ To see why 8×16 might also be problematic, let's assume a thread block (CTA) co
 
 threads per CTA = outputs per CTA / outputs per thread
 
-For an 8×8 tile that is 16,384 / 64 = 256 threads, and for an 8×16 tile it is 16,384 / 128 = 128 threads. Including the bookkeeping registers, an 8×8 tile needs about 128 registers per thread and an 8×16 tile about 200. An H100 SM has 65,536 registers, so:
+For an 8×8 tile that is 16,384 / 64 = 256 threads, and for an 8×16 tile it is 16,384 / 128 = 128 threads. Including the bookkeeping registers, an 8×8 tile needs about 128 registers per thread and an 8×16 tile about 200. Both the T4 and the H100 have 65,536 registers per SM, so the numbers below are the same on both GPUs:
 
 | Configuration | Threads/CTA | Regs/thread | Regs/CTA | CTAs per SM (65,536 regs) | Warps/SM | Warps/SMSP |
 |---|---|---|---|---|---|---|
 | 8×8, CTA 128×128 | 256 | ~128 | 32,768 | 2 | 16 | 4 |
 | 8×16, CTA 128×128 | 128 | ~200 | 25,600 | 2 | 8 | 2 |
 
-While 8×16 slightly raises the efficiency ceiling, it does so at the cost of halving the occupancy. Each SMSP's warp scheduler would only have 2 warps to choose from. If a warp stalls, for example on a global load or at a barrier, the scheduler is more likely to have no other work to pick up, and the idle slots go up.
+The T4 can hold at most 1024 threads (32 warps) per SM, half of the H100's 2048, but neither configuration comes close to that limit. The register file runs out first.
+
+While 8×16 slightly raises the efficiency ceiling on the H100 and adds shared-memory headroom on the T4, it does so at the cost of halving the occupancy. Each SMSP's warp scheduler would only have 2 warps to choose from. If a warp stalls, for example on a global load or at a barrier, the scheduler is more likely to have no other work to pick up, and the idle slots go up.
 
 ![With 4 warps per SMSP a stalled warp is always covered by another one, so every issue slot is filled; with only 2 warps per SMSP the same stall pattern leaves cycles where both warps are stalled and the issue slot goes idle](./warps-per-smsp.png)
 
@@ -252,7 +318,7 @@ So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and
 
 Until now, we have assumed that the data required by the FMAs is already available in shared memory. In the next section we will see how this is done.
 
-> Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling and warp tiling both protect shared-memory bandwidth, from two sides: register tiling reduces how many values each thread requests per FMA, while warp tiling arranges the lanes so that serving those requests costs fewer wavefronts (via broadcast and conflict-free access). Next, we will look at block tiling, which reuses each global-memory load across the whole CTA through shared memory, cutting L2/HBM traffic.
+> Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling and warp tiling both protect shared-memory bandwidth, from two sides: register tiling reduces how many values each thread requests per FMA, while warp tiling arranges the lanes so that serving those requests costs fewer wavefronts (via broadcast and conflict-free access). Next, we will look at block tiling, which reuses each global-memory load across the whole CTA through shared memory, cutting L2/DRAM traffic.
 
 ## Block Tiling
 
@@ -274,13 +340,23 @@ Since shared memory is limited, `BM + BN` has to stay within a budget. Under thi
 
 #### Lower Limit for B
 
-The lower limit for `B` is set by the condition that GMEM does not become the bottleneck. To be conservative, we assume that L2 does not help, and every byte loaded by a CTA comes from HBM.
+The lower limit for `B` is set by the condition that GMEM does not become the bottleneck. To be conservative, we assume that L2 does not help, and every byte loaded by a CTA comes from DRAM.
 
-The documented boost clock of the H100 SXM is 1.98 GHz, resulting in a peak throughput of `67 TFLOPs/sec`. HBM3 supports a bandwidth of `3.35 TB/sec`.
+The documented boost clock of the T4 is 1.59 GHz. With 40 SMs, each performing `128 FLOPs` per cycle, this results in a peak throughput of `40 × 128 × 1.59 GHz ≈ 8.1 TFLOPs/sec`. Its GDDR6 memory supports a bandwidth of `320 GB/sec`.
 
-> However, the sustained clock rate is about 1.75 GHz to keep power consumption in check under dense FP32 workloads, resulting in a peak throughput of about `59 TFLOPs/sec`. This lowers the required AI to about `17.6 FLOPs per byte`. On the other hand, the achievable HBM bandwidth is also lower than `3.35 TB/sec`, which pushes it back up. We will use `20 FLOPs per byte` as a slightly conservative target.
+To prevent DRAM transfers from being the bottleneck, we need a minimum AI of
 
-To prevent HBM transfers from being the bottleneck, we need a minimum AI of
+$$
+\frac{8.1 \ \text{TFLOPs/sec}}{0.32 \ \text{TB/sec}} \approx 25 \ \text{FLOPs per byte}
+$$
+
+$$
+\implies \frac{B}{4} \geq 25 \implies B \geq 100
+$$
+
+> The T4 is a 70 W card, and under a dense FP32 workload it often cannot hold its boost clock, which lowers the peak throughput and therefore the required AI. On the other hand, the achievable GDDR6 bandwidth is also lower than `320 GB/sec`, which pushes it back up. We will use `25 FLOPs per byte` as the target, and check both the actual clock and the achieved DRAM bandwidth in Nsight once we run the kernels.
+
+The documented boost clock of the H100 SXM is 1.98 GHz, resulting in a peak throughput of `67 TFLOPs/sec`. HBM3 supports a bandwidth of `3.35 TB/sec`. The minimum AI is
 
 $$
 \frac{67 \ \text{TFLOPs/sec}}{3.35 \ \text{TB/sec}} = 20 \ \text{FLOPs per byte}
@@ -290,7 +366,11 @@ $$
 \implies \frac{B}{4} \geq 20 \implies B \geq 80
 $$
 
-For a square block tile, `B` must be at least `80`.
+> However, the H100's sustained clock rate is about 1.75 GHz to keep power consumption in check under dense FP32 workloads, resulting in a peak throughput of about `59 TFLOPs/sec`. This lowers the required AI to about `17.6 FLOPs per byte`. On the other hand, the achievable HBM bandwidth is also lower than `3.35 TB/sec`, which pushes it back up. We will use `20 FLOPs per byte` as a slightly conservative target.
+
+Notice that the T4 actually needs a *higher* arithmetic intensity than the H100. The H100 has about `8×` the FP32 compute of the T4, but about `10×` its memory bandwidth, so every byte from DRAM has to be stretched further on the T4.
+
+For a square block tile, `B` must be at least `100` on the T4, and at least `80` on the H100.
 
 #### Upper Limit for B
 
@@ -306,35 +386,41 @@ $$
 \text{registers per CTA} = \frac{B^2}{64} \times 128 = 2B^2
 $$
 
-An H100 SM has `65,536` registers, and the whole CTA must fit on a single SM. Therefore,
+Both the T4 and the H100 have `65,536` registers per SM, and the whole CTA must fit on a single SM. Therefore,
 
 $$
 2B^2 \leq 65{,}536 \implies B \leq \sqrt{32{,}768} \approx 181
 $$
 
-So for square block tiles, the final inequality becomes
+So for square block tiles, the final inequalities become
 
 $$
-80 \leq B \leq 181
+\text{T4:} \quad 100 \leq B \leq 181
 $$
 
-`B` also needs to divide evenly into warp tiles of `32×64`, and powers of two keep the index math to shifts and masks. The only power of two in this range is `128`.
+$$
+\text{H100:} \quad 80 \leq B \leq 181
+$$
+
+`B` also needs to divide evenly into warp tiles of `32×64`, and powers of two keep the index math to shifts and masks. The only power of two in either range is `128`. The window is narrower on the T4, but it still lands on the same tile.
 
 #### Candidates
 
-Here is how the different block tile sizes compare against the `20 FLOPs per byte` target:
+Here is how the different block tile sizes compare against the `25 FLOPs per byte` target on the T4 and the `20 FLOPs per byte` target on the H100:
 
-| CTA tile  | FLOPs/byte | vs. 20 | Verdict                                         |
-|-----------|-----------:|-------:|-------------------------------------------------|
-| 32×32     | 8.0        | 0.40×  | HBM-bound                                       |
-| 64×64     | 16.0       | 0.80×  | HBM-bound without L2 help                       |
-| 64×128    | 21.3       | 1.07×  | nominally clears, no margin                     |
-| 96×128    | 27.4       | 1.37×  | clears; awkward warp decomposition              |
-| **128×128** | **32.0** | **1.60×** | **clears, with headroom**                    |
-| 256×128   | 42.7       | 2.13×  | more margin, at a price (only 1 CTA per SM)     |
-| 256×256   | 64.0       | 3.20×  | cannot launch (exceeds the register file)       |
+| CTA tile  | FLOPs/byte | vs. 25 (T4) | vs. 20 (H100) | Verdict                                         |
+|-----------|-----------:|------------:|--------------:|-------------------------------------------------|
+| 32×32     | 8.0        | 0.32×       | 0.40×         | DRAM-bound on both                              |
+| 64×64     | 16.0       | 0.64×       | 0.80×         | DRAM-bound without L2 help on both              |
+| 64×128    | 21.3       | 0.85×       | 1.07×         | DRAM-bound on the T4; no margin on the H100     |
+| 96×128    | 27.4       | 1.10×       | 1.37×         | clears both; awkward warp decomposition         |
+| **128×128** | **32.0** | **1.28×**   | **1.60×**     | **clears both, with headroom**                  |
+| 256×128   | 42.7       | 1.71×       | 2.13×         | more margin, at a price (only 1 CTA per SM)     |
+| 256×256   | 64.0       | 2.56×       | 3.20×         | cannot launch (exceeds the register file)       |
 
-Keep in mind that this assumes every byte comes from HBM. In practice, CTAs that share rows of `A` or columns of `B` get some of their data from L2, which lowers the HBM traffic further.
+Notice that `64×128`, which nominally clears the target on the H100, falls short on the T4. And the headroom that `128×128` has is smaller on the T4 (`1.28×`) than on the H100 (`1.60×`).
+
+Keep in mind that this assumes every byte comes from DRAM. In practice, CTAs that share rows of `A` or columns of `B` get some of their data from L2, which lowers the DRAM traffic further. The T4's L2 is only `4 MB` compared to the H100's `50 MB`, so we have less room to lean on it.
 
 ![Arithmetic intensity grows as B over 4 with the square block tile side. Below B equals 80 the tile sits under the 20 FLOPs per byte line and the cores wait on global memory; above B equals 181 the CTA needs more than the 65,536 registers of an SM and cannot be resident; 128 is the only power of two inside that window, landing at 32 FLOPs per byte. The ladder of candidate CTA tiles alongside shows 32 by 32 and 64 by 64 falling short of the target, 64 by 128 clearing it with no margin, and 128 by 128 and 256 by 128 clearing it with headroom](./block-tile-bounds.png)
 
@@ -346,9 +432,13 @@ $$
 2 \times 8 \times (128 + 128) \times 4 \ \text{bytes} = 16 \ \text{KB per CTA}
 $$
 
-The register file allows `2` such CTAs per SM, so together they use `32 KB` out of the `228 KB` of shared memory available on an H100 SM. Even with `BK = 32`, each CTA uses only `64 KB`, or `128 KB` for two. Most of the shared memory is left unused.
+The register file allows `2` such CTAs per SM, so together they use `32 KB` of shared memory.
 
-The budget that actually limits us is the register file. The register file limits the *area* of the tile, `BM · BN` (the accumulators), and not `BM + BN`. For a fixed area, a square tile still has the highest AI, but nothing forces us to keep the area fixed. Let's look at bigger tiles: `256×128` and `256×256`.
+On the T4, an SM has at most `64 KB` of shared memory (Turing splits a `96 KB` block between L1 and shared memory), so two CTAs use half of it. Shared memory is much tighter here than on the H100. With `BK = 16`, each CTA uses `32 KB` and two CTAs fill all `64 KB`. With `BK = 32`, each CTA would use `64 KB`, and only one CTA would fit on the SM.
+
+On an H100, the two CTAs use `32 KB` out of the `228 KB` available per SM. Even with `BK = 32`, each CTA uses only `64 KB`, or `128 KB` for two. Most of the shared memory is left unused.
+
+So at `BK = 8`, the budget that actually limits us on both GPUs is the register file. The register file limits the *area* of the tile, `BM · BN` (the accumulators), and not `BM + BN`. For a fixed area, a square tile still has the highest AI, but nothing forces us to keep the area fixed. Let's look at bigger tiles: `256×128` and `256×256`.
 
 ##### 256×256
 
@@ -362,7 +452,7 @@ $$
 \text{registers per CTA} = 1024 \times 128 = 131{,}072
 $$
 
-This is twice the size of the SM's register file.
+This is twice the size of the SM's register file on both GPUs.
 
 ##### 256×128
 
@@ -378,7 +468,9 @@ $$
 
 This uses exactly the whole register file. The CTA fits, but there is no room for a second CTA on the same SM. Its 16 warps are arranged as `8×2` warp tiles of `32×64`, and it uses only `2 × 8 × (256 + 128) × 4 bytes = 24 KB` of shared memory.
 
-| Configuration | Threads/CTA | Regs/CTA | CTAs/SM | Warps/SM | Warps/SMSP | SMEM/SM | AI (FLOPs/byte) | HBM traffic (4096³) |
+Since both GPUs have the same register file, the table below holds for both. Only the shared memory available differs: `64 KB` per SM on the T4 and `228 KB` on the H100.
+
+| Configuration | Threads/CTA | Regs/CTA | CTAs/SM | Warps/SM | Warps/SMSP | SMEM/SM | AI (FLOPs/byte) | DRAM traffic (4096³) |
 |---------------|------------:|---------:|--------:|---------:|-----------:|--------:|----------------:|--------------------:|
 | 128×128       | 256         | 32,768   | 2       | 16       | 4          | 32 KB   | 32.0            | 4.29 GB             |
 | 256×128       | 512         | 65,536   | 1       | 16       | 4          | 24 KB   | 42.7            | 3.22 GB             |
@@ -392,19 +484,19 @@ The warps in a CTA are tied together by `__syncthreads`. This is where having tw
 
 - **Barriers:** With two `128×128` CTAs, a `__syncthreads` stalls only the 8 warps of its own CTA. While they wait for the slowest warp, or for a global load that was not fully hidden, the 8 warps of the other CTA can keep issuing FFMAs. With a single `256×128` CTA, all 16 warps wait at the same barrier at every `k` tile, and the slowest warp holds up the whole SM.
 - **Prologue and epilogue:** Every CTA starts by loading its first tile, with no compute to overlap it with, and ends by writing its output tile to `C`. With two CTAs per SM, one CTA is usually computing while the other is starting or finishing. With one CTA per SM, the SM sits idle during every prologue and epilogue.
-- **Small problems:** Bigger tiles mean fewer CTAs. For a `1024×1024×1024` matrix multiply, `128×128` results in 64 CTAs, while `256×128` results in only 32 CTAs for 132 SMs.
+- **Small problems:** Bigger tiles mean fewer CTAs. For a `1024×1024×1024` matrix multiply, `128×128` results in 64 CTAs, while `256×128` results in only 32 CTAs. That leaves 8 of the T4's 40 SMs with nothing to do, and 100 of the H100's 132 SMs.
 
 ![Schematic SM timelines for the two configurations. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue](./one-cta-vs-two.png)
 
-So when would `256×128` be worth giving up the second CTA? Only when the `20 FLOPs per byte` target no longer holds, which can happen in two ways:
+So when would `256×128` be worth giving up the second CTA? Only when the FLOPs-per-byte target no longer holds, which can happen in two ways:
 
-- **The GEMM gets less HBM bandwidth than we assumed.** The target assumes the kernel has all `3.35 TB/sec` to itself. If other kernels run at the same time, the GEMM's share can drop below the `2.1 TB/sec` that `128×128` needs. `256×128` needs only `1.6 TB/sec`
+- **The GEMM gets less DRAM bandwidth than we assumed.** At peak compute, the `4096³` GEMM takes about `17 ms` on the T4 and about `2 ms` on the H100. Moving `4.29 GB` in that time, `128×128` needs about `254 GB/sec` on the T4 and `2.1 TB/sec` on the H100. `256×128` needs only `191 GB/sec` and `1.6 TB/sec` respectively. On the H100, the GEMM has plenty of margin unless other kernels running at the same time eat into its share. On the T4, `254 GB/sec` is about `80%` of the `320 GB/sec` peak, which is close to what GDDR6 sustains in practice.
 
-- **The compute rate is much higher.** On the same H100, FP16 tensor cores deliver about `989 TFLOPs/sec`, which raises the target to about `300 FLOPs per byte`. No block tile reaches that from HBM alone, so tensor-core kernels rely on L2 reuse and use the biggest tiles that fit, typically `128×256` or `256×128`.
+- **The compute rate is much higher.** FP16 tensor cores deliver about `65 TFLOPs/sec` on the T4 and about `989 TFLOPs/sec` on the H100, which raises the target to about `200` and `300 FLOPs per byte` respectively. No block tile reaches that from DRAM alone, so tensor-core kernels rely on L2 reuse and use the biggest tiles that fit, typically `128×256` or `256×128`.
 
-Neither applies to our FP32 GEMM, so for the rest of this blog we will assume a block tile size of `128×128`.
+On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close to the edge, but the clock throttling we discussed earlier lowers the compute rate and therefore the bandwidth we need, and CTAs sharing rows of `A` and columns of `B` still get some of their data from L2. So for the rest of this blog we will assume a block tile size of `128×128`, and check the achieved DRAM throughput in Nsight to see how close to the edge we actually are.
 
-> Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be, and on an H100 the register file runs out first. Within this budget, `128×128` already clears the HBM target with room to spare, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
+> Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be. On both GPUs the register file runs out first, though on the T4 shared memory is not far behind. Within this budget, `128×128` clears the DRAM target on both GPUs, with plenty of room on the H100 and less on the T4, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
 
 ### Padding
 
