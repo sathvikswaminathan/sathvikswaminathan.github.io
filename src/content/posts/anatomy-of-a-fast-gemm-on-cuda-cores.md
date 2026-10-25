@@ -1,7 +1,7 @@
 ---
 author: Sathvik Swaminathan
 pubDatetime: 2026-10-20T05:00:00Z
-title: Tiling Hierarchy on GPUs
+title: Anatomy of a Fast GEMM on CUDA Cores
 featured: true
 tags:
   - gpu
@@ -117,7 +117,7 @@ On an H100, an SM sustains `128` FMAs per cycle, which would need `128 × 2 = 25
 
 Interestingly, both GPUs land on the same number. The T4 has half the FP32 cores per SM, but it also has half the shared-memory bandwidth, so the ratio between the two stays the same.
 
-![Without reuse, 32 loaded FP32 values feed only 16 FMAs and 112 of the SM's 128 lanes sit idle; with each loaded value feeding 4 FMAs, all 128 lanes stay busy](./required-arithmetic-intensity.png)
+![The same comparison drawn for both GPUs. On the T4 an SM has 64 FP32 lanes and the shared-memory pipe hands over 16 values per cycle: without reuse those 16 values feed only 8 FMAs and 56 lanes sit idle, while at 4 FMAs per loaded value all 64 lanes stay busy. On the H100 an SM has 128 lanes and the pipe hands over 32 values per cycle: without reuse they feed 16 FMAs and 112 lanes sit idle, and again 4 FMAs per loaded value fills every lane. Both GPUs idle 87.5% of their lanes without reuse and both land on the same required intensity of 4](./required-arithmetic-intensity.png)
 
 Now compare this against the outer product. A single `k` step needs `M` values of `A` and `N` values of `B` in the registers. Since `M` and `N` are both far too large to fit in the register file, every CUDA thread instead computes a small `m×n` tile of the output matrix and loads only `m + n` values. Assuming `m = n`, each thread computes an `m×m` output tile from `2m` loaded values, resulting in an AI of `m² / 2m = m/2`.
 
@@ -288,7 +288,7 @@ On an H100, fewer issue slots are then used up by `LDS`, which improves the issu
 
 So why not just use `4×4` on the T4? Because the issue slots are not the only constraint. As we saw in register tiling, the T4's shared memory can only keep up with the FMAs if every loaded value feeds at least `4` FMAs. A `4×4` tile only gives `2`, so the cores would wait on shared memory half the time. An `8×8` tile gives exactly `4`, which keeps the shared-memory pipe fully busy with no slack. An `8×16` tile gives `128 / 24 = 5.3` FMAs per load, leaving about 25% of the shared-memory bandwidth free for bank conflicts and for the stores that stage data into shared memory.
 
-![Registers per thread grow with the tile area, from 32 at 4 by 4 to 320 at 16 by 16, which overshoots the 255 register limit and spills to local memory, while the issue-slot efficiency ceiling it buys flattens from 67% to 80% to 84%](./tile-size-tradeoff.png)
+![Three panels. The first is shared by both GPUs: registers per thread grow with the tile area, from 32 at 4 by 4 to 96 at 8 by 8 to 176 at 8 by 16 to 320 at 16 by 16, which overshoots the 255-register limit and spills to local memory. The second panel is the T4, where the issue-slot efficiency ceiling is 100% for every tile because the LDS instructions fit in the free slots between the FFMAs; what rules out 4 by 4 there is shared memory, which only gets 2 FMAs per load against the 4 required. The third panel is the H100, where every LDS costs an FFMA issue slot, so the ceiling climbs from 67% to 80% to 84% to 89% and flattens out as the register bill grows](./tile-size-tradeoff.png)
 
 On an H100, moving from an 8×8 tile to an 8×16 tile raises the issue-slot efficiency ceiling by only 4%, while consuming 80 more registers per thread. On the T4, it buys some shared-memory headroom, but nothing in terms of issue slots. A 16×16 tile doesn't fit on either GPU: 320 registers is over the limit, so the compiler would spill registers into local memory, which is per-thread storage that lives in global memory. Every access to a spilled value then needs an extra instruction:
 
@@ -422,7 +422,7 @@ Notice that `64×128`, which nominally clears the target on the H100, falls shor
 
 Keep in mind that this assumes every byte comes from DRAM. In practice, CTAs that share rows of `A` or columns of `B` get some of their data from L2, which lowers the DRAM traffic further. The T4's L2 is only `4 MB` compared to the H100's `50 MB`, so we have less room to lean on it.
 
-![Arithmetic intensity grows as B over 4 with the square block tile side. Below B equals 80 the tile sits under the 20 FLOPs per byte line and the cores wait on global memory; above B equals 181 the CTA needs more than the 65,536 registers of an SM and cannot be resident; 128 is the only power of two inside that window, landing at 32 FLOPs per byte. The ladder of candidate CTA tiles alongside shows 32 by 32 and 64 by 64 falling short of the target, 64 by 128 clearing it with no margin, and 128 by 128 and 256 by 128 clearing it with headroom](./block-tile-bounds.png)
+![Arithmetic intensity grows as B over 4 with the square block tile side, drawn once per GPU. On the T4 the floor is the 25 FLOPs per byte line, so B must be at least 100; on the H100 the floor is 20 FLOPs per byte and B need only reach 80. Both share the same ceiling: above B equals 181 the CTA needs more than the 65,536 registers of an SM and cannot be resident. 128 is the only power of two inside either window, landing at 32 FLOPs per byte. The ladder of candidate CTA tiles below scores each one against both targets: 32 by 32 and 64 by 64 fall short on both, 64 by 128 clears the H100 by 1.07 times but misses the T4 at 0.85 times, and 128 by 128 clears both with 1.28 times on the T4 and 1.60 times on the H100](./block-tile-bounds.png)
 
 #### Is 128×128 the best we can do?
 
@@ -486,7 +486,7 @@ The warps in a CTA are tied together by `__syncthreads`. This is where having tw
 - **Prologue and epilogue:** Every CTA starts by loading its first tile, with no compute to overlap it with, and ends by writing its output tile to `C`. With two CTAs per SM, one CTA is usually computing while the other is starting or finishing. With one CTA per SM, the SM sits idle during every prologue and epilogue.
 - **Small problems:** Bigger tiles mean fewer CTAs. For a `1024×1024×1024` matrix multiply, `128×128` results in 64 CTAs, while `256×128` results in only 32 CTAs. That leaves 8 of the T4's 40 SMs with nothing to do, and 100 of the H100's 132 SMs.
 
-![Schematic SM timelines for the two configurations. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue](./one-cta-vs-two.png)
+![Schematic SM timelines for the two configurations, which hold on both GPUs since each puts 16 warps on an SM. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue. A panel below compares the DRAM bandwidth each configuration needs: on the T4 128 by 128 asks for 254 GB/sec, about 80% of the 320 GB/sec GDDR6 peak, against 191 GB/sec for 256 by 128; on the H100 the same two configurations need 2.1 and 1.6 TB/sec out of 3.35 TB/sec, leaving plenty of margin](./one-cta-vs-two.png)
 
 So when would `256×128` be worth giving up the second CTA? Only when the FLOPs-per-byte target no longer holds, which can happen in two ways:
 

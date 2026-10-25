@@ -83,7 +83,7 @@ If each thread needs 64 registers and the SM has 65,536, at most 1,024 threads (
 
 The part people get wrong: **occupancy is a means, not an end.** It is not a score to maximize. What you actually need is enough *memory-level parallelism* to cover the latency — enough independent loads in flight. Occupancy is one way to get that; instruction-level parallelism within a single thread is another.
 
-This is Volkov's well-known result: a kernel at low occupancy but with several independent loads per thread can outperform a high-occupancy kernel with one dependent load each. It's also exactly the tension from [the tiling post](/posts/tiling-hierarchy-on-gpus/) — big register tiles raise arithmetic intensity and lower occupancy, and the optimum is usually not at either extreme.
+This is Volkov's well-known result: a kernel at low occupancy but with several independent loads per thread can outperform a high-occupancy kernel with one dependent load each. It's also exactly the tension from [the tiling post](/posts/anatomy-of-a-fast-gemm-on-cuda-cores/) — big register tiles raise arithmetic intensity and lower occupancy, and the optimum is usually not at either extreme.
 
 Raising occupancy from very low to moderate usually helps a lot. Pushing from moderate to maximal, at the cost of smaller tiles and more spilling, usually hurts.
 
