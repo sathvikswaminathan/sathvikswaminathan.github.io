@@ -200,7 +200,7 @@ The CUDA cores are idle during these idle slots, waiting for the data to be load
 
 Register prefetching removes the idle slots.
 
-> TODO: correct the scheduler trace.
+> **TODO:** Add a sentence saying the traces follow a single warp, i.e. a worst case. With 4 warps per SMSP, other warps fill most of these idle slots, which is why prefetching matters most when occupancy is low. Also note that nvcc already hoists the loads for `k+1` above the FFMAs of `k` when the loop is fully unrolled (see `regtile` vs `regtile_serial` in the code), so mention the compiler does this on its own.
 
 #### Register Prefetching
 
@@ -291,6 +291,31 @@ While 8×16 slightly raises the efficiency ceiling on the H100 and adds shared-m
 
 So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and libraries often autotune tile sizes for each GPU and problem shape. For the rest of this blog, we will assume a thread tile size of 8×8.
 
+### Register Bank Conflicts
+
+> **TODO:** One or two lead-in paragraphs. Every tier we optimize has banks: the register file does too. Even with operands already in registers, an FFMA can be delayed if its source registers collide in a register bank. This is another source of idle slots that has nothing to do with memory.
+
+#### How the Register File is Banked
+
+> **TODO:** Explain the banking on Turing, citing the microbenchmarking paper (Jia et al., *Dissecting the NVidia Turing T4 GPU via Microbenchmarking*, 2019):
+> - Register `Rn` lives in bank `n % 2` (2 banks, each 64 bits wide).
+> - An FFMA reads 3 source registers. A conflict happens when all 3 fall in the same bank, and the instruction takes an extra cycle to read its operands.
+> - The **operand reuse cache**: a `.reuse` flag on an operand keeps it cached for the next instruction in the same operand slot, so that read doesn't touch the register file at all.
+> - Show one or two real SASS lines from `cuobjdump -sass`, e.g. `FFMA R10, R84.reuse, R92, R10`, and annotate the banks.
+> - Say clearly that the H100's register file isn't publicly documented to the same level, so this section is T4-specific.
+
+#### Why the Outer Product is Reuse-Friendly
+
+> **TODO:** Explain why the 8×8 outer product suits the reuse cache. `a[i]` stays the same across the 8 FFMAs of a row (`acc[i][0..7] += a[i] * b[j]`), so the compiler can mark it `.reuse` and only `b[j]` and `acc[i][j]` are read from the register file. Note the catch: `LDS.128` writes 4 consecutive registers (`R4–R7`), so each fragment of `a` and `b` covers both banks. Where conflicts remain depends on which registers the compiler gives the accumulators.
+
+#### Conflicts in the Compiled Kernels
+
+> **TODO:** Show the static count of FFMAs whose 3 sources (after the reuse cache) are all in one bank, per kernel. With nvcc 13.0 I measured: `regtile`/`prefetch`/`warptile` 0%, `vectorized` ~4%, `swizzle`/`raster` ~2–3.5%, `dbuf`/`padding` ~13–15%. **Rerun with Colab's nvcc**, since this depends entirely on the compiler's register allocation.
+> - Key point: the "most optimized" kernels got the worst allocation, purely as a side effect of `ptxas`.
+> - Caveats: these are static counts, not measured stalls. On the T4 the scheduler only issues an FFMA every other cycle, so a one-cycle read delay may be partly hidden; it likely matters more on the H100.
+> - There's no direct Nsight counter for this that I know of. Check whether `smsp__warp_issue_stalled_dispatch_stall_per_warp_active.pct` moves between kernels, but don't claim it measures bank conflicts.
+> - End by saying CUDA C gives no control over register allocation, and point forward to the SASS section.
+
 ## Warp Tiling
 
 The `LDS` instructions we have seen so far are issued as warp-wide load instructions by the whole warp to shared memory. Each one carries the addresses requested by all 32 threads, each of which is loading data for its own `8×8` tile. The effective bandwidth with which SMEM delivers this data to the warp depends on which tiles the 32 threads are computing. If they are grouped such that the `LDS` leads to a lot of bank conflicts, that again leads to idle slots, as the `LDS` for step `k+1` can take longer than the compute in step `k`. This is what warp tiling addresses.
@@ -332,7 +357,12 @@ The warp tile is the union of all 32 thread tiles assigned to a warp. Its dimens
 
 ### Vectorized Shared-Memory Loads
 
-> TODO: talk about vectorized loads here, as they can reduce idle slots, and make the distinction between loads to global memory, shared memory, etc.
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
+> - The table separating `LDG` (global → registers), `STS` (registers → shared) and `LDS` (shared → registers), with their latencies.
+> - What vectorization buys: `LDS.128` cuts the H100's 8×8 issue-slot ceiling loss (80% → 94%), which removes most of the case for 8×16. On the T4 it relieves the MIO queue.
+> - Alignment and contiguity: why `A` must be transposed, and why `B`'s 8 values are split into two 4-wide chunks 32 floats apart.
+> - Bank conflicts with `LDS.128`: the 4 phases of 8 lanes, a contiguous thread tile gives a 2-way conflict, the strided split is conflict-free.
+> - Note that nvcc already emits `LDS.128` for kernels 03–05 on its own. The strided layout in kernel 06 is what removes the conflict. Measure with `profile.py smem warptile vectorized`.
 
 > Every tiling level lowers the bandwidth demand on the memory level below it by reusing each fetched value across more FMAs. Register tiling and warp tiling both protect shared-memory bandwidth, from two sides: register tiling reduces how many values each thread requests per FMA, while warp tiling arranges the lanes so that serving those requests costs fewer wavefronts (via broadcast and conflict-free access). Next, we will look at block tiling, which reuses each global-memory load across the whole CTA through shared memory, cutting L2/DRAM traffic.
 
@@ -344,11 +374,51 @@ All the warps in an SM load their inputs from shared memory. At each `k` step, a
 
 ### Loading Tiles from Global to Shared Memory
 
+> **TODO:** Short intro (draft in `gemm-remaining-sections-draft.md`). At every `k` tile the CTA loads a `128×8` tile of `A` and an `8×128` tile of `B`: 1024 floats each. With 256 threads, that's 4 floats of each per thread, so exactly one `LDG.128` each. Which 4 floats each thread loads decides whether the global loads are coalesced and whether the shared-memory stores conflict. Add a code snippet labeled `// from 06_vectorized.cu`.
+
 #### Coalesced Global Loads
+
+> **TODO:** Explain 32-byte sectors and coalescing (draft available).
+> - `B` tile: lane `i` loads floats `4i … 4i+3` of a row, so a warp reads one 512-byte row: 16 sectors, all fully used.
+> - `A` tile: rows are only 32 bytes (one sector). Two lanes share a row, so a warp covers 16 rows: 16 sectors, each fully used.
+> - The bad case: one lane per row walking down column `k` gives 12.5% sector efficiency and 8× the DRAM traffic, undoing the block-tiling budget.
+> - Measure: sectors per request from `profile.py global` (16 is ideal for a warp-wide `LDG.128`).
 
 #### Transposing A
 
+> **TODO:** Explain why `A` is stored transposed in shared memory (`As[k][m]`) (draft available).
+> - The outer product needs a *column* of `A` per `k` step, which is strided in row-major `A`. Transposing makes it a contiguous, 16-byte-aligned row, ready for `LDS.128`.
+> - Show the snippet: one `LDG.128`, then 4 scalar `STS` into `As[k0 + i][m]`.
+> - Cost: 4 `STS` instead of 1 per thread per `k` tile, which is small next to 512 FFMAs.
+> - Set up the bank conflict: with 128-float rows, the two lanes sharing a row write to the same bank (`bank = m mod 32`), a 2-way conflict. Point forward to Shared Memory Layout.
+> - Optional: connect this to how CPU BLAS libraries pack matrices into tile-friendly layouts.
+
+### Handling Matrix Edges
+
+> **TODO:** Intro. Every kernel so far assumes `M`, `N` are multiples of 128 and `K` a multiple of 8, but real shapes (e.g. inference with odd batch sizes or hidden sizes) aren't. Explain what goes wrong without checks: out-of-bounds reads (garbage or a crash) and out-of-bounds writes to `C`. Explain why GEMM edges are cheap to handle: only the CTAs on the right and bottom edges, and the last `k` tile, are partial.
+
+#### Predicated Loads and Stores
+
+> **TODO:** Explain predication with a snippet from the boundary-checked kernel.
+> - Guard each global load with a bounds check and **zero-fill** out-of-range elements in shared memory, so the outer product needs no checks at all (zeros contribute nothing to the sum).
+> - Guard each store to `C` with a row/column check.
+> - The vectorization catch: an `LDG.128` needs 4 in-bounds, 16-byte-aligned floats. If `K` or `N` isn't a multiple of 4, the edge needs scalar loads, or the whole kernel falls back to scalar.
+> - Show the cost: compare the boundary-checked kernel against the unchecked one at 4096 (should be within noise), and at an awkward size like 4000 or 4095.
+> - Mention the common trick of a fast path for full tiles and a checked path only for edge CTAs.
+
+#### Padding the Matrices Instead
+
+> **TODO:** The alternative: copy `A` and `B` into buffers padded up to multiples of the tile size, run the unchecked kernel, and copy out the valid part of `C`. Compare costs: the copy is O(n²) memory traffic against the GEMM's O(n³) compute, so it's cheap for big square GEMMs but expensive for small or skinny ones. Say which approach you used and why.
+
 ### Shared Memory Double Buffering
+
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
+> - The single-buffered loop: `LDG`, `STS`, barrier, compute, barrier. Nothing can overlap the global-load latency.
+> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value.**
+> - The double-buffered loop: `LDG` tile `t+1` into staging registers, compute tile `t`, `STS` into the other buffer, one barrier. Explain why one barrier is enough.
+> - Costs: 16 KB of shared memory per CTA instead of 8 KB, and 8 staging registers per thread.
+> - Measure: `long_scoreboard` stalls should drop sharply from `vectorized` to `dbuf` (`profile.py stalls`).
+> - Aside: `cp.async` (Ampere+) and TMA (Hopper) remove the staging registers. The T4 has neither.
 
 ### Block Tile Dimension
 
@@ -446,7 +516,7 @@ Here is how the different block tile sizes compare against the `25 FLOPs per byt
 
 Notice that `64×128`, which nominally clears the target on the H100, falls short on the T4. And the headroom that `128×128` has is smaller on the T4 (`1.28×`) than on the H100 (`1.60×`).
 
-> TODO: why does 96×128 have an awkward warp decomposition?
+> **TODO:** Answer this in a sentence or two. 96×128 needs 192 threads (6 warps), which tile it as 3×2 warp tiles of 32×64, so the warp layout itself works. The awkward parts are elsewhere: 4096 / 96 isn't an integer (so the last row of tiles needs boundary handling), the index math needs divisions by 3 instead of shifts, and 6 warps don't spread evenly over the 4 SMSPs.
 
 Keep in mind that this assumes every byte comes from DRAM. In practice, CTAs that share rows of `A` or columns of `B` get some of their data from L2, which lowers the DRAM traffic further. The T4's L2 is only `4 MB` compared to the H100's `50 MB`, so we have less room to lean on it.
 
@@ -528,14 +598,119 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 
 ### Shared Memory Layout
 
+> **TODO:** One-paragraph intro. Recall the 2-way conflict on the transposed stores into `As` (128-float rows, two lanes per row writing to the same bank) and introduce the two fixes: padding and swizzling.
+
 #### Padding
+
+> **TODO:** Draft available. Points to cover:
+> - `As[2][BK][BM + PAD]`. Why `PAD = 1` fixes the conflict but breaks `LDS.128` alignment (rows of 516 bytes).
+> - `PAD = 4`: rows of 132 floats keep 16-byte alignment, and rows `k` and `k+4` are now 16 banks apart (`bank = (4k + m) mod 32`).
+> - The bank table (stride 128 vs 132) and the cost: 256 bytes per CTA, negligible even on the T4.
+> - Measure: STS wavefronts per instruction should drop from ~2 to 1 (`profile.py smem dbuf padding`).
 
 #### Swizzling
 
+> **TODO:** Draft available. Points to cover:
+> - XOR the column index with bits of the row index: physical column `m ^ ((k >> 2) << 4)`, i.e. rows 4–7 shift by 16 floats (16 banks).
+> - Readers must apply the same XOR. Since only bit 4 changes, 4-float chunks move as a whole and stay aligned for `LDS.128`.
+> - The comparison table (memory cost, conflicts, `LDS.128` compatibility, index math) and the figure with 128-wide, padded and swizzled tiles.
+> - Why it matters later: Hopper's TMA writes dense tiles with no room for padding, and swizzles in hardware (32/64/128-byte patterns).
+
+## Scheduling CTAs Across the GPU
+
+> **TODO:** Short intro. Everything so far optimized what happens *inside* a CTA. The last two questions are about the grid as a whole: which CTAs run at the same time (L2 reuse), and how evenly the CTAs fill the SMs (wave quantization).
+
 ### CTA Rasterization
+
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
+> - CTAs in the same output row share `A` panels; CTAs in the same column share `B` panels. Reuse through L2 only happens if they run at the same time.
+> - Residency: 80 CTAs at a time on the T4 (40 SMs × 2), 264 on the H100, so 1024 CTAs is ~13 and ~4 waves.
+> - Row-major launch order vs grouped (`GROUP_M`): distinct tiles per `k` tile drop from 35 to 18 on the T4, and 41 to 33 on the H100. Include the two ASCII diagrams and the remapping snippet.
+> - Why the T4 benefits more: few resident CTAs, a small 4 MB L2, and DRAM bandwidth already near the edge.
+> - Measure: sweep `GROUP_M = 1, 2, 4, 8, 16` with `profile.py l2 raster`; plot L2 hit rate and DRAM bytes read.
+> - Caveat: the numbers assume CTAs in a wave run in lockstep, which they don't.
+
+### Wave Quantization
+
+> **TODO:** Explain how CTAs are scheduled in waves of (SMs × CTAs per SM): 80 on the T4, 264 on the H100. If the CTA count isn't a multiple of that, the last wave is partly empty.
+> - 4096³ with `128×128` tiles: 1024 CTAs is 12.8 waves on the T4 (~98% efficient) and 3.88 waves on the H100 (~97%). Hardly matters.
+> - 1024³: only 64 CTAs. That fills 80% of the T4's slots, and just 24% of the H100's. Most of the H100 sits idle.
+> - Formula: efficiency = waves / ⌈waves⌉. Add a plot of efficiency vs matrix size for both GPUs (a sawtooth).
+> - Measure: run the harness at a few sizes (e.g. 512, 1024, 1536, 2048, 4096) and compare TFLOPs/sec against the predicted efficiency.
+> - Tie back to the "Small problems" bullet in One Big CTA or Two Small Ones?, and lead into split-K as the fix.
+
+#### Split-K
+
+> **TODO:** Explain split-K: divide the `k` dimension into `S` slices, give each slice its own CTA (so `S×` more CTAs), and sum the partial `C` tiles at the end.
+> - Two ways to reduce: `atomicAdd` into `C` (simple, but nondeterministic summation order), or write partials to a workspace and run a small reduction kernel.
+> - Cost: each extra slice writes and reads a full `M×N` partial result, so it only pays off when `M×N` is small relative to `K`.
+> - Example: 1024×1024×4096 on the H100 with `S = 4` gives 256 CTAs (~97% of one wave) instead of 64 (24%).
+> - Measure: compare `S = 1, 2, 4, 8` on the H100-sized problem, or on the T4 with an even smaller `M×N` and a large `K`.
+> - Mention stream-K (used by CUTLASS) as the more general version, and leave it for the Hopper post.
+
+## Autotuning
+
+> **TODO:** Intro. The post derived `8×8` and `128×128` from first principles, but several choices were close calls (`BK`, `8×8` vs `8×16`, `GROUP_M`, `128×128` vs `256×128`), and the best choice depends on the problem shape. Autotuning means compiling several configurations and picking the fastest by measurement. This section checks how well the paper analysis predicted the winner.
+
+### The Search Space
+
+> **TODO:** Describe the parameters and the constraints that prune them.
+> - Parameters: `BM`, `BN` (64, 128, 256), `BK` (8, 16, 32), thread tile `TM×TN` (4×4, 8×8, 8×16), warp layout, `GROUP_M`, and split-K `S`.
+> - Constraints from the post: registers per thread ≤ 255 (no spills), registers per CTA vs the 65,536 register file, shared memory per CTA vs the T4's 64 KB, and divisibility (warp tiles must tile the CTA tile).
+> - Implementation: templated kernel, a list of valid configurations generated at compile time, and the harness timing each one. Mention how long the full sweep takes on the T4.
+
+### Best Configurations on the T4
+
+> **TODO:** Report the winners for a few shapes: a big square GEMM (4096³), a small one (1024³), and one or two inference-like skinny shapes (e.g. `M = 16` or `64` with `N = K = 4096`).
+> - Table: shape, best configuration, TFLOPs/sec, and how far the post's default (`128×128`, `8×8`, `BK = 8`) is from the best.
+> - Discuss where the first-principles analysis was right and where it was wrong. This is one of the most valuable paragraphs in the post.
+> - Optional: compare against what cuBLAS picks (visible as the kernel name in `ncu`).
 
 ## Results
 
+> **TODO:** Intro. Each optimization was motivated by a number computed on paper, so this section checks those numbers against the hardware. State up front which GPU the results are from. If the H100 numbers are only predictions, say so here.
+
 ### Nsight Measurements
 
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Fill in:
+> - The progression table (one row per kernel, with a link to its file): ms, TFLOPs/sec, % of peak, plus cuBLAS. Use `./gemm all 4096 20`. Compute % of peak with the *measured* clock.
+> - Prediction vs measurement for each key claim: real clock, DRAM bandwidth (~80% predicted for `128×128`), η per kernel, STS/LDS wavefronts per instruction, `long_scoreboard` drop from double buffering, L2 hit rate vs `GROUP_M`.
+> - A short "what I got wrong" note for every claim that didn't hold, with your best explanation.
+> - Mention that the profiles used `--clock-control none` and why.
+> - One or two Nsight Compute screenshots (e.g. the memory chart or the source view with stalls).
+
+## Going Below CUDA C: Fixing Register Bank Conflicts in SASS
+
+> **TODO:** Intro. Register Bank Conflicts showed the problem; CUDA C can't fix it, because `ptxas` owns register allocation. This section edits the compiled SASS of the final kernel directly, using CuAssembler (which supports `sm_75`). Briefly say what SASS is, and why NVIDIA's own libraries still ship hand-tuned kernels.
+
+### Reading the SASS
+
+> **TODO:** The workflow and the diagnosis.
+> - Compile to a cubin (`nvcc -cubin -arch=sm_75`), disassemble with CuAssembler into an editable `.cuasm` file, reassemble, and load the cubin from the harness with `cuModuleLoad` + `cuLaunchKernel`.
+> - Walk through the inner loop of the final kernel: the `LDS.128`s, the 64 FFMAs per `k` step, `.reuse` flags, and the control codes (stall counts, yield, scoreboard barriers) at a high level.
+> - Point at specific FFMAs with all 3 sources in one bank, using the conflict-counting script.
+
+### Renaming the Accumulators
+
+> **TODO:** Explain the fix.
+> - `a` and `b` can't be moved: `LDS.128` writes 4 consecutive registers, so each fragment covers both banks. The accumulators are free to rename.
+> - Rule: for every FFMA where `a[i]` and `b[j]` share a bank, put `acc[i][j]` in the other bank. 32 of the 64 pairs need this (16 even, 16 odd); the other 32 are free.
+> - Rename consistently across the whole kernel (zero-init, FFMAs, `STG` epilogue), and keep the total at or under 128 registers so 2 CTAs still fit per SM.
+> - Why this edit is safe: renaming without reordering leaves the control codes valid. Reordering instructions is where hand-edited SASS usually breaks.
+> - Optional second experiment: adding `.reuse` flags where nvcc missed them, measured separately.
+
+### Before and After
+
+> **TODO:** Show the result.
+> - Conflict count before and after (from the script), and the correctness check against cuBLAS (hand-edited cubins can be silently wrong).
+> - TFLOPs/sec and issue metrics (η, FMA pipe %, dispatch stalls) for nvcc's cubin vs the edited one.
+> - If the gain is small on the T4, explain why (FFMA issue every other cycle, 4 warps per SMSP to hide delays) and what you'd expect on the H100. A small gain is still a valid result.
+
 ## Conclusion
+
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Update it for the new sections:
+> - One line per level of the hierarchy: register tiling, register prefetching and vectorized loads, warp tiling, block tiling, double buffering and padding/swizzling, rasterization and wave quantization, plus the SASS edit.
+> - The final number: % of cuBLAS reached on the T4.
+> - The CPU-engineer perspective: same answer (`8×8`, `128×128`) on two very different GPUs, but different margins.
+> - What you got wrong along the way, in one or two sentences.
+> - Lead-in to the next post: tensor cores on the T4.
