@@ -39,6 +39,8 @@ Here are the numbers for both GPUs that we will keep coming back to:
 | Shared memory load latency | ~22 cycles | ~30 cycles |
 | Max threads per SM | 1024 | 2048 |
 
+> **TODO:** Cite a source for every number in this table (NVIDIA datasheets for the specs; Jia et al. 2019, *Dissecting the NVidia Turing T4 GPU via Microbenchmarking*, for the T4 microarchitecture numbers). Two to reconcile: Jia et al. measured the T4's no-conflict shared-memory latency at **19 cycles** (the table says ~22), and an L2 miss at about **296 cycles** (TLB hit). Either use their numbers or measure your own, and keep the traces in Eliminating Idle Slots consistent with whichever you pick.
+
 ## Table of contents
 
 ## Where the FLOPs come from
@@ -311,7 +313,8 @@ So there are clear trade-offs in choosing the tile size. 8×8 is not a rule, and
 #### Conflicts in the Compiled Kernels
 
 > **TODO:** Show the static count of FFMAs whose 3 sources (after the reuse cache) are all in one bank, per kernel. With nvcc 13.0 I measured: `regtile`/`prefetch`/`warptile` 0%, `vectorized` ~4%, `swizzle`/`raster` ~2–3.5%, `dbuf`/`padding` ~13–15%. **Rerun with Colab's nvcc**, since this depends entirely on the compiler's register allocation.
-> - Key point: the "most optimized" kernels got the worst allocation, purely as a side effect of `ptxas`.
+> - Key point: the "most optimized" kernels got the worst allocation, purely as a side effect of `ptxas`. `dbuf` and `raster` have identical inner loops, yet for the 256 FFMAs per `k` tile where `a[i]` and `b[j]` share a bank, `ptxas` put the accumulator in the *other* bank for 224 of them in `raster`, and in the *same* bank for 198 of them in `dbuf`.
+> - Explain why the accumulators are the only free choice: `LDS.128` fixes the banks of `a` and `b` (4 consecutive registers each), and although `STG.128` needs each `acc[i][0..3]` in 4 consecutive registers at the end, the compiler can move accumulators there for free by writing an FFMA's result to a different register than its accumulator input (e.g. `FFMA R109, R84, R90, R46`).
 > - Caveats: these are static counts, not measured stalls. On the T4 the scheduler only issues an FFMA every other cycle, so a one-cycle read delay may be partly hidden; it likely matters more on the H100.
 > - There's no direct Nsight counter for this that I know of. Check whether `smsp__warp_issue_stalled_dispatch_stall_per_warp_active.pct` moves between kernels, but don't claim it measures bank conflicts.
 > - End by saying CUDA C gives no control over register allocation, and point forward to the SASS section.
@@ -354,6 +357,12 @@ The warp tile is the union of all 32 thread tiles assigned to a warp. Its dimens
 ```
 (WM, WN) = (TM · LM, TN · LN)
 ```
+
+Fewer unique floats is necessary but not sufficient. It sets how much data a warp needs per `k` step, but whether those floats can be read without bank conflicts depends on where each lane's 8 rows and 8 columns sit in shared memory. Note that a bank conflict can only occur between lanes of the *same* instruction: an `LDS` reads either from the `A` tile or from the `B` tile, never both, so an `A` value and a `B` value in the same bank never conflict with each other.
+
+With the `4×8` grid and contiguous thread tiles (lane `(lm, ln)` owns rows `8·lm … 8·lm + 7` and columns `8·ln … 8·ln + 7`), the `A` loads are conflict-free: the 8 lanes with the same `lm` read the same address (a broadcast), leaving 4 distinct addresses at offsets 0, 8, 16 and 24, which fall in 4 different banks. The `B` loads are not. The 4 lanes with the same `ln` share an address, leaving 8 distinct addresses at offsets 0, 8, 16, …, 56. Since the 64-wide warp tile spans two rows of 32 banks, offsets 0 and 32 land in the same bank, as do 8 and 40, and so on: a 2-way bank conflict on every `B` load. The [Vectorized Shared-Memory Loads](#vectorized-shared-memory-loads) section fixes this by changing how each lane's columns are laid out, without changing the 96 unique floats.
+
+> **TODO:** Add a small figure for this: the 8 distinct `B` addresses of one `LDS` (offsets 0, 8, …, 56) drawn against the 32 banks, showing the pairs that collide. Confirm with `profile.py smem warptile`: the `LDS` wavefronts per instruction should be above the ideal for kernel 05.
 
 ### Vectorized Shared-Memory Loads
 
@@ -414,7 +423,7 @@ All the warps in an SM load their inputs from shared memory. At each `k` step, a
 
 > **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
 > - The single-buffered loop: `LDG`, `STS`, barrier, compute, barrier. Nothing can overlap the global-load latency.
-> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value.**
+> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value** (Jia et al. report about 296 cycles for an L2 miss on the T4, and 616 on a first access that also misses the TLB).
 > - The double-buffered loop: `LDG` tile `t+1` into staging registers, compute tile `t`, `STS` into the other buffer, one barrier. Explain why one barrier is enough.
 > - Costs: 16 KB of shared memory per CTA instead of 8 KB, and 8 staging registers per thread.
 > - Measure: `long_scoreboard` stalls should drop sharply from `vectorized` to `dbuf` (`profile.py stalls`).
@@ -586,6 +595,8 @@ The warps in a CTA are tied together by `__syncthreads`. This is where having tw
 
 ![Schematic SM timelines for the two configurations, which hold on both GPUs since each puts 16 warps on an SM. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue. A panel below compares the DRAM bandwidth each configuration needs: on the T4 128 by 128 asks for 254 GB/sec, about 80% of the 320 GB/sec GDDR6 peak, against 191 GB/sec for 256 by 128; on the H100 the same two configurations need 2.1 and 1.6 TB/sec out of 3.35 TB/sec, leaving plenty of margin](./one-cta-vs-two.png)
 
+> **TODO:** Add an aside on how this trade-off changes on Hopper. Shared memory is one budget, spent either on depth (more pipeline stages per CTA, which hides memory latency; by Little's law, stages needed ≈ bytes per second needed × latency / bytes per stage) or on breadth (more CTAs per SM, which hides whole-CTA stalls: barriers, prologue, epilogue). The T4 kernels pick breadth because every `k` tile ends in a `__syncthreads`. Hopper GEMMs pick depth (typically one CTA per SM with 4+ stages), because warp specialization (a TMA producer warp and consumer warpgroups), per-stage mbarriers instead of CTA-wide barriers, persistent kernels and ping-pong consumer warpgroups provide what the second CTA was for. Keep it short and point to the Hopper post.
+
 So when would `256×128` be worth giving up the second CTA? Only when the FLOPs-per-byte target no longer holds, which can happen in two ways:
 
 - **The GEMM gets less DRAM bandwidth than we assumed.** At peak compute, the `4096³` GEMM takes about `17 ms` on the T4 and about `2 ms` on the H100. Moving `4.29 GB` in that time, `128×128` needs about `254 GB/sec` on the T4 and `2.1 TB/sec` on the H100. `256×128` needs only `191 GB/sec` and `1.6 TB/sec` respectively. On the H100, the GEMM has plenty of margin unless other kernels running at the same time eat into its share. On the T4, `254 GB/sec` is about `80%` of the `320 GB/sec` peak, which is close to what GDDR6 sustains in practice.
@@ -629,6 +640,9 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 > - Why the T4 benefits more: few resident CTAs, a small 4 MB L2, and DRAM bandwidth already near the edge.
 > - Measure: sweep `GROUP_M = 1, 2, 4, 8, 16` with `profile.py l2 raster`; plot L2 hit rate and DRAM bytes read.
 > - Caveat: the numbers assume CTAs in a wave run in lockstep, which they don't.
+> - Be honest about the expected gain. The minimum L2 hit rate a kernel needs is `1 − (tile FLOPs per byte) / (ridge FLOPs per byte)`. For the FP32 `128×128` tile that's `1 − 32/25 < 0` on the T4 (and `1 − 32/20` on the H100): L2 reuse is *not required*, only margin. But the margin is thin on the T4 (254 GB/sec, ~80% of peak DRAM bandwidth at full FP32 speed), so check `dram__throughput` for `dbuf`/`padding` first. If it's well below ~70% of peak, predict a small gain from rasterization; if it's near ~75% or more, predict a measurable one. Then confirm with the `GROUP_M` sweep either way.
+> - Other reasons it can still help on the T4: L2 hits are faster than DRAM (about 188 vs 296 cycles, per Jia et al.), which is easier for double buffering to hide; and smaller tiles (e.g. `64×64`, 16 FLOPs per byte) *do* need it, at least `1 − 16/25 ≈ 36%` hits.
+> - Contrast with tensor cores in one paragraph: a `128×128` FP16 tile delivers 64 FLOPs per byte against ridges of about 203 (T4) and 295 (H100), so it needs at least 68% and 78% L2 hits. Rasterization goes from optional to essential, which sets up the tensor-core post. (The H100 worked example PDF has the full derivation.)
 
 ### Wave Quantization
 
@@ -690,14 +704,14 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 > - Walk through the inner loop of the final kernel: the `LDS.128`s, the 64 FFMAs per `k` step, `.reuse` flags, and the control codes (stall counts, yield, scoreboard barriers) at a high level.
 > - Point at specific FFMAs with all 3 sources in one bank, using the conflict-counting script.
 
-### Renaming the Accumulators
+### Reordering FFMAs and Reuse Flags
 
-> **TODO:** Explain the fix.
-> - `a` and `b` can't be moved: `LDS.128` writes 4 consecutive registers, so each fragment covers both banks. The accumulators are free to rename.
-> - Rule: for every FFMA where `a[i]` and `b[j]` share a bank, put `acc[i][j]` in the other bank. 32 of the 64 pairs need this (16 even, 16 odd); the other 32 are free.
-> - Rename consistently across the whole kernel (zero-init, FFMAs, `STG` epilogue), and keep the total at or under 128 registers so 2 CTAs still fit per SM.
-> - Why this edit is safe: renaming without reordering leaves the control codes valid. Reordering instructions is where hand-edited SASS usually breaks.
-> - Optional second experiment: adding `.reuse` flags where nvcc missed them, measured separately.
+> **TODO:** Explain the fix (study guide, section 6.4).
+> - The fragment banks are fixed: `LDS.128` writes 4 consecutive registers, so `a[i]` is in bank `i mod 2` and `b[j]` in bank `j mod 2`.
+> - Run each row's 8 FFMAs (`acc[i][0..7]`) back-to-back with `a[i]` in slot A and `.reuse` set. Only the first FFMA of the row then reads `a[i]` from the register file; the other 7 read just two registers and can't conflict.
+> - Start each row with a `j` whose `b[j]` is in the other bank from `a[i]` (odd `j` for even `i`, and vice versa). Then none of the 64 FFMAs has all three sources in one bank.
+> - Correctness rules: reorder only independent FFMAs within one `k` step, keep wait masks and stall counts on their positions, don't cross the `LDS` instructions, keep each row contiguous, check the loop-carried distance between steps, and avoid `.reuse` after a yield.
+> - The rejected alternative (renaming accumulators into the other bank): `STG.128` needs each `acc[i][0..3]` in 4 consecutive registers, so a rename has to stay inside the loop and add `MOV`s afterwards. Inserting instructions is risky without control-flow support in the assembler. One paragraph on why you didn't do it this way.
 
 ### Before and After
 
