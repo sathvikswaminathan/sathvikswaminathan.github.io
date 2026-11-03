@@ -11,15 +11,15 @@ tags:
 description: GPUs are equipped with a tremendous amount of compute and a tiered memory architecture. How data is placed and accessed across these tiers determines how much of that compute is actually used.
 ---
 
-Matrix multiplication, the workload that dominates GPU time in deep learning, runs much slower than what the hardware is actually capable of when written in the straightforward way. This is not because the GPU lacks compute cores; rather, the compute cores remain idle while waiting for data to arrive.
+Matrix multiplication, the workload that dominates GPU time in deep learning, runs far slower than the hardware allows when written the straightforward way. The GPU doesn't lack compute; its cores sit idle, waiting for data to arrive.
 
-GPUs have a tiered memory hierarchy, with each level being slower than the previous one: register file, shared memory (SMEM)/L1 cache, L2 cache, and global memory (GMEM, i.e. DRAM). The compute cores remain idle if data is fetched from slower memory tiers too often, or if memory requests stall due to inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers such that data loaded into a faster tier is reused as many times as possible before being evicted, and to group accesses so that they are conflict-free. This way, the compute cores are fed from the fastest tier with minimal memory stalls.
+GPUs have a tiered memory hierarchy, with each level slower than the one before it: the register file, shared memory (SMEM)/L1 cache, L2 cache, and global memory (GMEM, i.e. DRAM). The compute cores stall if data is fetched from the slower tiers too often, or if memory requests are slowed by inefficient access patterns such as shared-memory bank conflicts or uncoalesced global loads. The fix is to organize data across these tiers so that anything loaded into a faster tier is reused as many times as possible before it is evicted, and to arrange accesses so that they are conflict-free. That way, the compute cores are fed from the fastest tier with as few memory stalls as possible.
 
-This blog post explores various optimization techniques and walks through the reasoning behind tile-size selection on the NVIDIA Tesla T4 GPU. It also includes calculations for the H100 to illustrate why different GPUs favor different tile sizes.
+This post walks through these optimization techniques and the reasoning behind choosing tile sizes for the NVIDIA Tesla T4. It also works through the same calculations for the H100, to show why different GPUs favor different tile sizes.
 
-Note: We will not consider tensor cores in this discussion; the focus is solely on CUDA-core-based kernel development.
+> **Note:** Tensor cores are out of scope here; the focus is entirely on kernels built on CUDA cores.
 
-Throughout this post we will consider an FP32 matrix multiply `C = A × B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`, with `M = N = K = 4096`.
+Throughout this post, we consider an FP32 matrix multiply `C = A × B`, where `A` is `M×K`, `B` is `K×N`, and `C` is `M×N`, with `M = N = K = 4096`.
 
 Here are the numbers for both GPUs that we will keep coming back to:
 
@@ -44,20 +44,21 @@ Here are the numbers for both GPUs that we will keep coming back to:
 ## Table of contents
 
 ## Where the FLOPs come from
+Every SM is divided into 4 subpartitions, known as SMSPs. Each SMSP has a warp scheduler that can issue one warp-wide instruction per cycle. A warp is a group of 32 threads, and each thread's position within its warp is called its lane (`0–31`). Each SMSP also has its own CUDA cores: 32 FP32 cores per SMSP on the H100, and 16 on the T4.
 
-Every SM is divided into 4 subpartitions known as SMSPs. Each SMSP has a warp scheduler which can issue one warp-wide instruction every cycle. A warp comprises 32 threads, and every thread's position in a warp is referred to as its lane (`0–31`). Each SMSP is also equipped with CUDA cores. On an H100, each SMSP hosts 32 FP32 CUDA cores; the T4 SMSP hosts 16 FP32 CUDA cores. The core count per SMSP decides how long a warp occupies the cores. Since a warp issues 32 FMAs per instruction, the H100's 32 FP32 cores retire a warp-wide FMA in a single cycle, matching the scheduler's issue rate. The T4's 16 cores need two cycles per warp, so its scheduler can only issue an FP32 FMA every other cycle and has to find other work, or run another warp, to fill the gap.
+The number of cores per SMSP decides how long a warp occupies them. A warp-wide FMA is 32 FMAs, one per lane. The H100's 32 FP32 cores retire it in a single cycle, matching the scheduler's issue rate. The T4's 16 cores need two cycles per warp, so its scheduler can only issue an FP32 FMA every other cycle, and has to fill the gap with other work, or with another warp.
 
-Each FP32 CUDA core can execute the FMA (fused multiply-add) instruction:
+Each FP32 CUDA core executes the FMA (fused multiply-add) instruction:
 
 ```text
 c = a * b + c
 ```
 
-Essentially, every FMA results in `2 FLOPs`: one multiplication and one addition. The CUDA cores are pipelined, allowing every core to perform `2 FLOPs` per cycle.
+Each FMA counts as `2 FLOPs`: one multiplication and one addition. The cores are pipelined, so each one can complete one FMA, or `2 FLOPs`, every cycle.
 
-On the T4, every SMSP has a peak throughput of `2 FLOPs × 16 = 32 FLOPs` per cycle. The whole SM can sustain a peak throughput of `4 × 32 FLOPs = 128 FLOPs`, or `64 FMAs`, per cycle.
+On the T4, each SMSP therefore peaks at `2 FLOPs × 16 = 32 FLOPs` per cycle, and the whole SM at `4 × 32 FLOPs = 128 FLOPs`, or `64 FMAs`, per cycle.
 
-On an H100, every SMSP has a peak throughput of `2 FLOPs × 32 = 64 FLOPs` per cycle, and the whole SM can sustain `4 × 64 FLOPs = 256 FLOPs`, or `128 FMAs`, per cycle.
+On the H100, each SMSP peaks at `2 FLOPs × 32 = 64 FLOPs` per cycle, and the whole SM at `4 × 64 FLOPs = 256 FLOPs`, or `128 FMAs`, per cycle.
 
 ## Arithmetic Intensity of Matrix Multiplication
 
