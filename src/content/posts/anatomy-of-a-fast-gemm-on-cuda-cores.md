@@ -386,50 +386,6 @@ All the warps in an SM load their inputs from shared memory. At each `k` step, a
 
 > **TODO:** Short intro (draft in `gemm-remaining-sections-draft.md`). At every `k` tile the CTA loads a `128×8` tile of `A` and an `8×128` tile of `B`: 1024 floats each. With 256 threads, that's 4 floats of each per thread, so exactly one `LDG.128` each. Which 4 floats each thread loads decides whether the global loads are coalesced and whether the shared-memory stores conflict. Add a code snippet labeled `// from 06_vectorized.cu`.
 
-#### Coalesced Global Loads
-
-> **TODO:** Explain 32-byte sectors and coalescing (draft available).
-> - `B` tile: lane `i` loads floats `4i … 4i+3` of a row, so a warp reads one 512-byte row: 16 sectors, all fully used.
-> - `A` tile: rows are only 32 bytes (one sector). Two lanes share a row, so a warp covers 16 rows: 16 sectors, each fully used.
-> - The bad case: one lane per row walking down column `k` gives 12.5% sector efficiency and 8× the DRAM traffic, undoing the block-tiling budget.
-> - Measure: sectors per request from `profile.py global` (16 is ideal for a warp-wide `LDG.128`).
-
-#### Transposing A
-
-> **TODO:** Explain why `A` is stored transposed in shared memory (`As[k][m]`) (draft available).
-> - The outer product needs a *column* of `A` per `k` step, which is strided in row-major `A`. Transposing makes it a contiguous, 16-byte-aligned row, ready for `LDS.128`.
-> - Show the snippet: one `LDG.128`, then 4 scalar `STS` into `As[k0 + i][m]`.
-> - Cost: 4 `STS` instead of 1 per thread per `k` tile, which is small next to 512 FFMAs.
-> - Set up the bank conflict: with 128-float rows, the two lanes sharing a row write to the same bank (`bank = m mod 32`), a 2-way conflict. Point forward to Shared Memory Layout.
-> - Optional: connect this to how CPU BLAS libraries pack matrices into tile-friendly layouts.
-
-### Handling Matrix Edges
-
-> **TODO:** Intro. Every kernel so far assumes `M`, `N` are multiples of 128 and `K` a multiple of 8, but real shapes (e.g. inference with odd batch sizes or hidden sizes) aren't. Explain what goes wrong without checks: out-of-bounds reads (garbage or a crash) and out-of-bounds writes to `C`. Explain why GEMM edges are cheap to handle: only the CTAs on the right and bottom edges, and the last `k` tile, are partial.
-
-#### Predicated Loads and Stores
-
-> **TODO:** Explain predication with a snippet from the boundary-checked kernel.
-> - Guard each global load with a bounds check and **zero-fill** out-of-range elements in shared memory, so the outer product needs no checks at all (zeros contribute nothing to the sum).
-> - Guard each store to `C` with a row/column check.
-> - The vectorization catch: an `LDG.128` needs 4 in-bounds, 16-byte-aligned floats. If `K` or `N` isn't a multiple of 4, the edge needs scalar loads, or the whole kernel falls back to scalar.
-> - Show the cost: compare the boundary-checked kernel against the unchecked one at 4096 (should be within noise), and at an awkward size like 4000 or 4095.
-> - Mention the common trick of a fast path for full tiles and a checked path only for edge CTAs.
-
-#### Padding the Matrices Instead
-
-> **TODO:** The alternative: copy `A` and `B` into buffers padded up to multiples of the tile size, run the unchecked kernel, and copy out the valid part of `C`. Compare costs: the copy is O(n²) memory traffic against the GEMM's O(n³) compute, so it's cheap for big square GEMMs but expensive for small or skinny ones. Say which approach you used and why.
-
-### Shared Memory Double Buffering
-
-> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
-> - The single-buffered loop: `LDG`, `STS`, barrier, compute, barrier. Nothing can overlap the global-load latency.
-> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value** (Jia et al. report about 296 cycles for an L2 miss on the T4, and 616 on a first access that also misses the TLB).
-> - The double-buffered loop: `LDG` tile `t+1` into staging registers, compute tile `t`, `STS` into the other buffer, one barrier. Explain why one barrier is enough.
-> - Costs: 16 KB of shared memory per CTA instead of 8 KB, and 8 staging registers per thread.
-> - Measure: `long_scoreboard` stalls should drop sharply from `vectorized` to `dbuf` (`profile.py stalls`).
-> - Aside: `cp.async` (Ampere+) and TMA (Hopper) remove the staging registers. The T4 has neither.
-
 ### Block Tile Dimension
 
 Let's say a CTA is responsible for computing a `BM × BN` tile of the output matrix `C`. This means that at each `k` step, the CTA loads `BM` entries of column `k` of `A` and `BN` entries of row `k` of `B` from global memory into shared memory.
@@ -608,25 +564,33 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 
 > Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be. On both GPUs the register file runs out first, though on the T4 shared memory is not far behind. Within this budget, `128×128` clears the DRAM target on both GPUs, with plenty of room on the H100 and less on the T4, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
 
-### Shared Memory Layout
+#### Coalesced Global Loads
 
-> **TODO:** One-paragraph intro. Recall the 2-way conflict on the transposed stores into `As` (128-float rows, two lanes per row writing to the same bank) and introduce the two fixes: padding and swizzling.
+> **TODO:** Explain 32-byte sectors and coalescing (draft available).
+> - `B` tile: lane `i` loads floats `4i … 4i+3` of a row, so a warp reads one 512-byte row: 16 sectors, all fully used.
+> - `A` tile: rows are only 32 bytes (one sector). Two lanes share a row, so a warp covers 16 rows: 16 sectors, each fully used.
+> - The bad case: one lane per row walking down column `k` gives 12.5% sector efficiency and 8× the DRAM traffic, undoing the block-tiling budget.
+> - Measure: sectors per request from `profile.py global` (16 is ideal for a warp-wide `LDG.128`).
 
-#### Padding
+#### Transposing A
 
-> **TODO:** Draft available. Points to cover:
-> - `As[2][BK][BM + PAD]`. Why `PAD = 1` fixes the conflict but breaks `LDS.128` alignment (rows of 516 bytes).
-> - `PAD = 4`: rows of 132 floats keep 16-byte alignment, and rows `k` and `k+4` are now 16 banks apart (`bank = (4k + m) mod 32`).
-> - The bank table (stride 128 vs 132) and the cost: 256 bytes per CTA, negligible even on the T4.
-> - Measure: STS wavefronts per instruction should drop from ~2 to 1 (`profile.py smem dbuf padding`).
+> **TODO:** Explain why `A` is stored transposed in shared memory (`As[k][m]`) (draft available).
+> - The outer product needs a *column* of `A` per `k` step, which is strided in row-major `A`. Transposing makes it a contiguous, 16-byte-aligned row, ready for `LDS.128`.
+> - Show the snippet: one `LDG.128`, then 4 scalar `STS` into `As[k0 + i][m]`.
+> - Cost: 4 `STS` instead of 1 per thread per `k` tile, which is small next to 512 FFMAs.
+> - Set up the bank conflict: with 128-float rows, the two lanes sharing a row write to the same bank (`bank = m mod 32`), a 2-way conflict. Point forward to Shared Memory Layout.
+> - Optional: connect this to how CPU BLAS libraries pack matrices into tile-friendly layouts.
 
-#### Swizzling
+### Shared Memory Double Buffering
 
-> **TODO:** Draft available. Points to cover:
-> - XOR the column index with bits of the row index: physical column `m ^ ((k >> 2) << 4)`, i.e. rows 4–7 shift by 16 floats (16 banks).
-> - Readers must apply the same XOR. Since only bit 4 changes, 4-float chunks move as a whole and stay aligned for `LDS.128`.
-> - The comparison table (memory cost, conflicts, `LDS.128` compatibility, index math) and the figure with 128-wide, padded and swizzled tiles.
-> - Why it matters later: Hopper's TMA writes dense tiles with no room for padding, and swizzles in hardware (32/64/128-byte patterns).
+> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
+> - The single-buffered loop: `LDG`, `STS`, barrier, compute, barrier. Nothing can overlap the global-load latency.
+> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value** (Jia et al. report about 296 cycles for an L2 miss on the T4, and 616 on a first access that also misses the TLB).
+> - The double-buffered loop: `LDG` tile `t+1` into staging registers, compute tile `t`, `STS` into the other buffer, one barrier. Explain why one barrier is enough.
+> - Costs: 16 KB of shared memory per CTA instead of 8 KB, and 8 staging registers per thread.
+> - Measure: `long_scoreboard` stalls should drop sharply from `vectorized` to `dbuf` (`profile.py stalls`).
+> - Aside: `cp.async` (Ampere+) and TMA (Hopper) remove the staging registers. The T4 has neither.
+
 
 ## Scheduling CTAs Across the GPU
 
@@ -662,6 +626,27 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 > - Example: 1024×1024×4096 on the H100 with `S = 4` gives 256 CTAs (~97% of one wave) instead of 64 (24%).
 > - Measure: compare `S = 1, 2, 4, 8` on the H100-sized problem, or on the T4 with an even smaller `M×N` and a large `K`.
 > - Mention stream-K (used by CUTLASS) as the more general version, and leave it for the Hopper post.
+
+### Shared Memory Layout
+
+> **TODO:** One-paragraph intro. Recall the 2-way conflict on the transposed stores into `As` (128-float rows, two lanes per row writing to the same bank) and introduce the two fixes: padding and swizzling.
+
+#### Padding
+
+> **TODO:** Draft available. Points to cover:
+> - `As[2][BK][BM + PAD]`. Why `PAD = 1` fixes the conflict but breaks `LDS.128` alignment (rows of 516 bytes).
+> - `PAD = 4`: rows of 132 floats keep 16-byte alignment, and rows `k` and `k+4` are now 16 banks apart (`bank = (4k + m) mod 32`).
+> - The bank table (stride 128 vs 132) and the cost: 256 bytes per CTA, negligible even on the T4.
+> - Measure: STS wavefronts per instruction should drop from ~2 to 1 (`profile.py smem dbuf padding`).
+
+#### Swizzling
+
+> **TODO:** Draft available. Points to cover:
+> - XOR the column index with bits of the row index: physical column `m ^ ((k >> 2) << 4)`, i.e. rows 4–7 shift by 16 floats (16 banks).
+> - Readers must apply the same XOR. Since only bit 4 changes, 4-float chunks move as a whole and stay aligned for `LDS.128`.
+> - The comparison table (memory cost, conflicts, `LDS.128` compatibility, index math) and the figure with 128-wide, padded and swizzled tiles.
+> - Why it matters later: Hopper's TMA writes dense tiles with no room for padding, and swizzles in hardware (32/64/128-byte patterns).
+
 
 ## Autotuning
 
