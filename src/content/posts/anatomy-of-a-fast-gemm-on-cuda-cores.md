@@ -563,11 +563,191 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 
 > Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be. On both GPUs the register file runs out first, though on the T4 shared memory is not far behind. Within this budget, `128×128` clears the DRAM target on both GPUs, with plenty of room on the H100 and less on the T4, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
 
-### K -Tiling
+### K-Tiling
 
-### Coalesced Global Loads (A Transpose)
+For a CTA to compute a `128×128` block tile of `C`, it needs `128` rows of all `4096` columns of `A` (a **slab** of `A`) and `128` columns of all `4096` rows of `B` (a slab of `B`). At `128 × 4096` FP32 values, each slab is `2 MB`, far more than the shared memory an SM has on either the T4 or the H100. The threads of the CTA therefore load the slabs in *slices*: a slice of `A` is `128 × BK` values and a slice of `B` is `BK × 128` values, enough for `BK` steps of the outer product's rank-1 update. The CTA loops over `K / BK` such slices.
 
-### SMEM Double Buffering
+Here is what K-tiling looks like from a CTA's perspective:
+
+```c
+for k0 in 0, BK, 2·BK, …, K − BK:              // K / BK = 512 k tiles
+    load A[rows of the CTA, k0 : k0+BK] → As      // LDG, then STS
+    load B[k0 : k0+BK, cols of the CTA] → Bs      // LDG, then STS
+    __syncthreads()                                // the whole slice is in SMEM
+    for k in 0 .. BK−1:                            // BK rank-1 updates
+        load a[0..7] from As[k], b[0..7] from Bs[k]    // 16 LDS
+        64 FFMAs using a, b
+    __syncthreads()                                // everyone is done with As, Bs
+store acc to C
+```
+
+Every `k` tile needs two barriers. The first makes sure the slice has fully arrived before anyone reads it. The second makes sure every warp has finished reading it before anyone overwrites it with the next slice. Between them, the CTA does nothing while the next slice travels from global memory: the loads for `k` tile `t+1` can't start until every warp is done computing on `k` tile `t`.
+
+![A CTA computing a 128 by 128 tile of C needs a 128 by 4096 slab of A and a 4096 by 128 slab of B, 2 MB each, far more than the 64 KB of shared memory a T4 SM has. The CTA therefore walks the k dimension in slices: at BK equals 8 it stages a 128 by 8 slice of A and an 8 by 128 slice of B, 8 KB in total, and loops 512 times. Each iteration loads the slice, waits at a barrier until the whole slice has arrived, runs 8 rank-1 updates on it, and waits at a second barrier until every warp has finished reading it, so the SM sits idle between the two barriers while the next slice travels from global memory](./k-tiling-slices.png)
+
+#### Sector Efficiency
+
+Before choosing `BK`, we need one more fact about how global memory is accessed.
+
+Global memory isn't read one float at a time. The memory system moves data between DRAM, L2 and the SM in fixed-size chunks called **sectors**, each `32 bytes` (8 FP32 values). Sectors are grouped in fours into `128-byte` cache lines, but the sector is the smallest unit that actually moves: if a warp asks for a single byte, the whole `32-byte` sector containing it is moved.
+
+When a warp issues a global load, the hardware collects the addresses of all 32 lanes, works out which sectors they touch, and moves each touched sector once. How well the lanes' addresses pack into sectors is measured by **sector efficiency**:
+
+```text
+sector efficiency = bytes the warp actually uses / bytes moved in whole sectors
+```
+
+Two extremes, for a warp loading one float per lane:
+
+- **Consecutive addresses:** lanes `0–31` read floats `0–31`, `128 bytes` in total. That is exactly `4` sectors, every byte moved is used, and the efficiency is `100%`. This is a **coalesced** load.
+- **Strided addresses:** each lane reads a float `128 bytes` away from its neighbor. The warp touches `32` different sectors, `1,024 bytes` are moved, and only `128` of them are used: an efficiency of `12.5%`.
+
+A load with low sector efficiency wastes bandwidth at every tier it passes through. The unused part of a sector sometimes stays in L1 or L2 long enough for a later load to use it, but there is no guarantee, and even then the load needed more sectors, and more trips through the memory pipeline, for the same useful data. The rule of thumb is to make every warp's loads cover whole sectors and use every byte in them.
+
+This is the property that sets the lower bound for `BK`.
+
+#### Lower Bound for BK
+
+`BK` doesn't change the arithmetic intensity: a `k` tile loads `(BM + BN) · BK` floats and performs `BM · BN · BK` FMAs, so `BK` cancels out. What it changes is the *shape* of each slice, and therefore how well the slice's loads use their sectors.
+
+`B` is easy. `B` is stored row-major, and each row of a `B` slice is `128` contiguous floats, or `512 bytes`: `16` full sectors, whatever `BK` is.
+
+`A` is the problem. `A` is also stored row-major, but a slice of `A` takes only `BK` columns from each of its `128` rows, so each row contributes `BK` contiguous floats, `4 · BK` bytes, and the next row starts `4,096` floats away. Each row of the slice is therefore its own sector run:
+
+- With `BK = 8`, each row is exactly `32 bytes`, one full sector. Sector efficiency is `100%`. This is referred to as a **coalesced global load**.
+- With `BK = 4`, each row is `16 bytes`, half a sector. Half of every sector moved is thrown away, and efficiency drops to `50%`.
+
+`BK = 8` also lines up with the loads each thread issues. A slice of `A` holds `128 × BK` floats, shared across `256` threads, so each thread loads `BK / 2` floats of `A`, and likewise `BK / 2` floats of `B`:
+
+| `BK` | Bytes per `A` row | `A` sector efficiency | Floats per thread per slab | Load per thread | `k` tiles (K = 4096) |
+|---|---|---|---|---|---|
+| 4 | 16 | 50% | 2 | `LDG.64` | 1024 |
+| **8** | **32** | **100%** | **4** | **`LDG.128`** | **512** |
+| 16 | 64 | 100% | 8 | 2 × `LDG.128` | 256 |
+
+At `BK = 8`, every thread issues exactly one 16-byte vector load (`LDG.128`) per slab, two neighboring threads cover one full sector of an `A` row, and every byte moved is used.
+
+![The 32-byte sector is the smallest unit the memory system moves. A warp whose 32 lanes read consecutive floats touches exactly 4 sectors and uses every byte of them, a coalesced load at 100% sector efficiency; a warp whose lanes are 128 bytes apart touches 32 separate sectors, moves 1,024 bytes and uses only 128 of them, 12.5% efficiency. This is what sets the lower bound on BK. B is stored row-major, so a row of a B slice is 128 contiguous floats, 16 full sectors, whatever BK is. A slice of A takes only BK columns from each of its 128 rows, and the next row starts 4,096 floats away, so each row is its own sector run: at BK equals 4 a row is 16 bytes and half of every sector moved is thrown away, while at BK equals 8 a row is exactly 32 bytes, one full sector, and the efficiency is back to 100%](./sector-efficiency.png)
+
+So on both the T4 and the H100, the lower bound is **`BK ≥ 8`**.
+
+Just as with register prefetching, the CTA can overlap its compute on the current slices of `A` and `B` (steps `[k0, k0 + BK)`) with the transfer of the next slices (steps `[k0 + BK, k0 + 2·BK)`). This is referred to as **SMEM double buffering**, and it doubles the shared memory cost.
+
+```c
+load slice 0 → As[0], Bs[0]
+__syncthreads()
+for t in 0 .. K/BK − 1:
+    cur = t % 2,  nxt = 1 − cur
+    if t + 1 < K/BK:
+        issue LDGs for slice t+1 → staging registers     // don't wait for them
+    for k in 0 .. BK−1:                                   // compute on As[cur], Bs[cur]
+        load a[0..7] from As[cur][k], b[0..7] from Bs[cur][k]
+        64 FFMAs using a, b
+    STS staging registers → As[nxt], Bs[nxt]              // the LDGs are back by now
+    __syncthreads()                                        // one barrier per k tile
+store acc to C
+```
+
+On the T4, the next slice has to pass through registers on its way to shared memory: an `LDG` brings it into registers, and an `STS` writes it to `As[nxt]` and `Bs[nxt]`. The `LDG`s are issued at the start of the `k` tile, and their results are only needed at the end, so the global-memory latency is overlapped with the `BK` rank-1 updates in between.
+
+> On Ampere and later (A100, H100), `cp.async` copies from global memory to shared memory without going through registers.
+
+On the T4, SMEM double buffering doesn't just double the shared memory footprint, it also adds to the register budget per thread. Turing has no instruction for copying global memory directly into shared memory (`cp.async` arrived with Ampere), so every thread loads its share of the next slice into registers with `LDG`, and only writes it to shared memory with `STS` after computing on the current slice. A slice holds `128 × BK` floats of `A` and `BK × 128` floats of `B`, so with `256` threads per CTA each thread stages `BK / 2` floats of each, or **`BK` registers per thread**, live for the entire `k` tile. At `BK = 8`, that's `2,048` floats per slice and `8` floats per thread, issued as two `LDG.128` instructions (one for `A`, one for `B`). Luckily, the `8×8` thread tile leaves room for these: `64` accumulators, `32` operand registers, `8` staging registers and about `24` for bookkeeping come to about `128` registers per thread, exactly each CTA's half of the register file (`32,768` registers for `256` threads). But that leaves no slack for a deeper slice. Registers are allocated in chunks of `8` per thread, so going from `BK = 8` to `BK = 16` adds `8` more staging registers, takes the kernel to `136`, and pushes the CTA past its half of the register file, costing us the second CTA.
+
+Is one `k` tile of compute enough to hide the load? One `k` tile of a `128×128` CTA at `BK = 8` is `128 × 128 × 8 = 131,072` FMAs. On the T4, at `64` FMAs per cycle, that's `2,048` cycles for one CTA, or `4,096` cycles when two CTAs share the SM:
+
+```text
+cycle     0       : issue LDGs for slice t+1           (overhead, ~4 instructions)
+cycle     0-4095  : BK rank-1 updates on slice t        (useful)
+                    slice t+1's LDGs are back by ~300-600,
+                    long before the k tile ends
+cycle  ~4096      : STS into As[nxt], Bs[nxt], barrier
+-------------------------------------------------------------
+global-memory latency fully hidden behind compute
+```
+
+#### Upper Bound for BK
+
+A larger `BK` costs shared memory. With double buffering, the slices of a `128×128` CTA take
+
+$$
+\text{SMEM per CTA} = 2 \times BK \times (BM + BN) \times 4 \ \text{bytes} = 2\,\text{KB} \times BK
+$$
+
+But a CTA doesn't get the whole SM. We chose a `128×128` block tile precisely so that the register file holds `2` CTAs per SM, so that the second CTA can keep issuing FFMAs while the first waits at a barrier. Shared memory has to be split the same way: each CTA gets **half of the SM's shared memory**.
+
+- **T4:** `64 KB / 2 = 32 KB` per CTA
+- **H100:** about `228 KB / 2 ≈ 113 KB` per CTA (Hopper reserves `1 KB` of shared memory per resident CTA for the system, which leaves `226 KB` to split between two)
+
+Setting `2 KB × BK` against these budgets:
+
+$$
+\text{T4:} \quad 2\,\text{KB} \times BK \leq 32\,\text{KB} \implies BK \leq 16
+$$
+
+$$
+\text{H100:} \quad 2\,\text{KB} \times BK \leq 113\,\text{KB} \implies BK \leq 56
+$$
+
+| `BK` | SMEM per CTA | Fits the T4's 32 KB per CTA? | Fits the H100's ~113 KB per CTA? | `k` tiles (K = 4096) |
+|---|---|---|---|---|
+| 8 | 16 KB | ✓ (half used) | ✓ | 512 |
+| 16 | 32 KB | ✓ (exactly full) | ✓ | 256 |
+| 32 | 64 KB | ✗ | ✓ | 128 |
+| 64 | 128 KB | ✗ | ✗ | 64 |
+
+`BK` should also divide `K` and keep the slice loads in whole `LDG.128`s, which in practice means a power of two. That leaves `BK ≤ 16` on the T4 and `BK ≤ 32` on the H100.
+
+On the T4, `BK = 16` only just fits: with double buffering, its two slices take exactly `32 KB`, the CTA's entire share of shared memory, with nothing left over. Shared memory alone would allow it, but the register file doesn't. As we saw with double buffering, each thread stages `BK` floats of the next slice in registers, so `BK = 16` adds `8` more registers per thread, pushes the CTA past its half of the register file, and costs us the second CTA.
+
+The H100 has room to go deeper. Each CTA's `~113 KB` holds `BK = 32` (`64 KB`, or `65 KB` with padding) with plenty to spare, and a kernel that stages its slices with `cp.async` pays nothing in registers for the extra depth, so shared memory is the only limit.
+
+A deeper `BK` is also worth more on the H100. Every `k` tile ends with a `__syncthreads` and some loop and address bookkeeping. As we saw in [Issue Slot Efficiency](#issue-slot-efficiency), on the T4 most of that bookkeeping slips into the free slots between FFMAs, but on the H100 every one of those instructions takes an issue slot from an FFMA. Going from `BK = 8` to `BK = 32` cuts the number of `k` tiles from `512` to `128`, so the H100 pays for its barriers and bookkeeping a quarter as often.
+
+So with two CTAs sharing each SM, the bounds are:
+
+$$
+\text{T4:} \quad 8 \leq BK \leq 16 \qquad \text{H100:} \quad 8 \leq BK \leq 32
+$$
+
+On the T4, `BK = 16` sits right at the edge of each CTA's share of both shared memory and the register file, so we will use **`BK = 8`** for the rest of this blog. On the H100, `BK = 32` costs nothing in occupancy and is the better choice for a `cp.async` kernel.
+
+![The window for BK, drawn once per GPU. Shared memory per CTA grows as 2 KB times BK with double buffering, and the floor at BK equals 8 is set by sector efficiency on the A slice. On the T4 each CTA gets half of the SM's 64 KB, so shared memory alone would allow BK equals 16 at exactly 32 KB, with nothing to spare; the register file closes that door first, because each thread stages BK floats of the next slice and the extra 8 registers push the kernel from 128 to 136 registers per thread and past the CTA's half of the register file, costing the second CTA. On the H100 each CTA gets about 113 KB, cp.async stages slices without touching registers, and BK equals 32 fits at 64 KB with room left over](./bk-window.png)
+
+### A Transpose
+
+Setting `BK = 8` lets every slice of `A` be loaded from global memory with `100%` sector efficiency. But the threads don't read `A` back out of shared memory in the same order they wrote it. `A` is stored row-major in GMEM, so a coalesced load brings in a few consecutive `k` values of each row. The outer product, on the other hand, needs a *column* of `A` at every `k` step: each thread needs `8` values of `A`, one from each row of its thread tile.
+
+If the slice is stored into SMEM in the same row-major order, `As[m][k]` sits at address `m · 8 + k`, and a thread's `8` values at step `k` are `8` floats apart. They can't be fetched with a single `LDS.128`, so each one needs its own `LDS.32`: `8` loads per `k` step instead of `2`. And across the warp, the lanes that own different rows read addresses `64` floats apart, all of which fall in the same bank.
+
+That's a `4`-way bank conflict on every load of `A`, which raises the latency of each `LDS`, on top of the `4×` more load instructions. To fix this, `A` is typically **transposed** on its way from GMEM into SMEM, and stored as `As[k][m]` at address `k · 128 + m`. Column `k` of the `A` tile becomes row `k` of `As`, so a thread's `8` values are contiguous and come in with two `LDS.128`s. The lane groups now start `8` floats apart, in different banks, and the conflicts are gone. From the compute loop's point of view, `A` now looks exactly like `B`: one contiguous row per `k` step.
+
+![Two 32-bank grids side by side, showing where one warp's A operands land under the 4 by 8 lane grid. Stored row-major as As at m k, address m times 8 plus k, the four lanes that own different rows read addresses 0, 64, 128 and 192 for a0 at k equals 0; all four are multiples of 32, so all four land in bank 0 and the load is serialized into 4 wavefronts, and because the 8 values a thread needs are 8 floats apart they also need 8 separate LDS.32 instructions. Stored transposed as As at k m, address k times 128 plus m, the same four lane groups start at 0, 8, 16 and 24, landing in banks 0, 8, 16 and 24, and each group's 8 values are contiguous, so one wavefront serves the request and 2 LDS.128 instructions replace the 8 LDS.32](./a-transpose-banks.png)
+
+The global load stays exactly as it was, coalesced and row-wise. The transpose happens on the store:
+
+```c
+// global → registers: coalesced, row-wise
+float4 a4 = LDG.128(A[m][k0 + kg : k0 + kg + 4])     // 4 consecutive k of one row m
+
+// registers → shared memory: transposed
+As[nxt][kg + 0][m] = a4.x                             // 4 separate STS.32,
+As[nxt][kg + 1][m] = a4.y                             // one per row of As
+As[nxt][kg + 2][m] = a4.z
+As[nxt][kg + 3][m] = a4.w
+```
+
+Since the `4` values a thread loads are consecutive in `k`, after the transpose they belong to `4` different rows of `As`, and go out as `4 STS.32` instead of a single `STS.128`. That's a good trade: each value of `A` is written into SMEM once per `k` tile, but read at every `k` step. Per thread per `k` tile, that's `4 STS.32` on the write side against `16 LDS.128` on the read side.
+
+The transposed stores do have one problem of their own. Within a warp, two neighboring threads load the two halves (`kg = 0` and `kg = 4`) of the same row `m`, and write into the same column `m` of `As`, `4` rows apart:
+
+```text
+(kg + j) · 128 + m    and    (kg + 4 + j) · 128 + m
+```
+
+These addresses are `512` floats apart, a multiple of `32`, so they fall in the same bank: a **2-way bank conflict** on every transposed store. The [Shared Memory Layout](#shared-memory-layout) section fixes this with padding or swizzling.
+
+![The store side of the transpose. The 32 threads of a warp cover 16 rows m of the A slice, two threads per row, one holding the half of the row at kg equals 0 and the other the half at kg equals 4. On the first of the four transposed STS.32 instructions they write As at 0 and m and As at 4 and m, addresses m and 512 plus m. The two are 512 floats apart, a multiple of 32, so both land in bank m: the warp's 32 stores crowd into banks 0 through 15, two to a bank, leaving banks 16 through 31 untouched and serializing every transposed store into 2 wavefronts](./a-transpose-store-conflict.png)
 
 
 ## Scheduling CTAs Across the GPU
