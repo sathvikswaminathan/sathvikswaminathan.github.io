@@ -382,10 +382,6 @@ Until now, we have assumed that the data required by the FMAs is already availab
 
 All the warps in an SM load their inputs from shared memory. At each `k` step, a single warp loads `WM` entries of the `k`-th column of `A` and `WN` entries of the `k`-th row of `B`. That is `WM + WN` floats per warp loaded from shared memory, and the SM hosts more than a single warp to hide latency. These values need to be staged into shared memory from global memory by the CTA before its warps can access them.
 
-### Loading Tiles from Global to Shared Memory
-
-> **TODO:** Short intro (draft in `gemm-remaining-sections-draft.md`). At every `k` tile the CTA loads a `128×8` tile of `A` and an `8×128` tile of `B`: 1024 floats each. With 256 threads, that's 4 floats of each per thread, so exactly one `LDG.128` each. Which 4 floats each thread loads decides whether the global loads are coalesced and whether the shared-memory stores conflict. Add a code snippet labeled `// from 06_vectorized.cu`.
-
 ### Block Tile Dimension
 
 Let's say a CTA is responsible for computing a `BM × BN` tile of the output matrix `C`. This means that at each `k` step, the CTA loads `BM` entries of column `k` of `A` and `BN` entries of row `k` of `B` from global memory into shared memory.
@@ -550,6 +546,9 @@ The warps in a CTA are tied together by `__syncthreads`. This is where having tw
 - **Prologue and epilogue:** Every CTA starts by loading its first tile, with no compute to overlap it with, and ends by writing its output tile to `C`. With two CTAs per SM, one CTA is usually computing while the other is starting or finishing. With one CTA per SM, the SM sits idle during every prologue and epilogue.
 - **Small problems:** Bigger tiles mean fewer CTAs. For a `1024×1024×1024` matrix multiply, `128×128` results in 64 CTAs, while `256×128` results in only 32 CTAs. That leaves 8 of the T4's 40 SMs with nothing to do, and 100 of the H100's 132 SMs.
 
+
+> TODO: also ,mention cotnention of reousrc4es across 2 CTAs on a SM as opposed to one CTA using all the SMs resources to itself
+
 ![Schematic SM timelines for the two configurations, which hold on both GPUs since each puts 16 warps on an SM. With two 128 by 128 CTAs, the barriers of CTA 0 and CTA 1 are independent and fall at different times, so whenever one CTA is waiting at a __syncthreads the other still has FFMAs to issue and the SM loses only its prologue. With one 256 by 128 CTA, all 16 warps wait at the same barrier, so every barrier, along with the prologue and the epilogue, leaves the SM with nothing to issue. A panel below compares the DRAM bandwidth each configuration needs: on the T4 128 by 128 asks for 254 GB/sec, about 80% of the 320 GB/sec GDDR6 peak, against 191 GB/sec for 256 by 128; on the H100 the same two configurations need 2.1 and 1.6 TB/sec out of 3.35 TB/sec, leaving plenty of margin](./one-cta-vs-two.png)
 
 > **TODO:** Add an aside on how this trade-off changes on Hopper. Shared memory is one budget, spent either on depth (more pipeline stages per CTA, which hides memory latency; by Little's law, stages needed ≈ bytes per second needed × latency / bytes per stage) or on breadth (more CTAs per SM, which hides whole-CTA stalls: barriers, prologue, epilogue). The T4 kernels pick breadth because every `k` tile ends in a `__syncthreads`. Hopper GEMMs pick depth (typically one CTA per SM with 4+ stages), because warp specialization (a TMA producer warp and consumer warpgroups), per-stage mbarriers instead of CTA-wide barriers, persistent kernels and ping-pong consumer warpgroups provide what the second CTA was for. Keep it short and point to the Hopper post.
@@ -564,32 +563,11 @@ On the H100, neither applies to our FP32 GEMM. On the T4, the first one is close
 
 > Block tiling lowers the bandwidth demand on global memory by reusing each value loaded into shared memory across the whole CTA. Shared memory decides how deep (`BK`) a block tile can be, but the register file decides how big (`BM × BN`) it can be. On both GPUs the register file runs out first, though on the T4 shared memory is not far behind. Within this budget, `128×128` clears the DRAM target on both GPUs, with plenty of room on the H100 and less on the T4, so we spend the remaining budget on a second CTA per SM to hide latency, rather than on a bigger tile.
 
-#### Coalesced Global Loads
+### K -Tiling
 
-> **TODO:** Explain 32-byte sectors and coalescing (draft available).
-> - `B` tile: lane `i` loads floats `4i … 4i+3` of a row, so a warp reads one 512-byte row: 16 sectors, all fully used.
-> - `A` tile: rows are only 32 bytes (one sector). Two lanes share a row, so a warp covers 16 rows: 16 sectors, each fully used.
-> - The bad case: one lane per row walking down column `k` gives 12.5% sector efficiency and 8× the DRAM traffic, undoing the block-tiling budget.
-> - Measure: sectors per request from `profile.py global` (16 is ideal for a warp-wide `LDG.128`).
+### Coalesced Global Loads (A Transpose)
 
-#### Transposing A
-
-> **TODO:** Explain why `A` is stored transposed in shared memory (`As[k][m]`) (draft available).
-> - The outer product needs a *column* of `A` per `k` step, which is strided in row-major `A`. Transposing makes it a contiguous, 16-byte-aligned row, ready for `LDS.128`.
-> - Show the snippet: one `LDG.128`, then 4 scalar `STS` into `As[k0 + i][m]`.
-> - Cost: 4 `STS` instead of 1 per thread per `k` tile, which is small next to 512 FFMAs.
-> - Set up the bank conflict: with 128-float rows, the two lanes sharing a row write to the same bank (`bank = m mod 32`), a 2-way conflict. Point forward to Shared Memory Layout.
-> - Optional: connect this to how CPU BLAS libraries pack matrices into tile-friendly layouts.
-
-### Shared Memory Double Buffering
-
-> **TODO:** Draft available in `gemm-remaining-sections-draft.md`. Points to cover:
-> - The single-buffered loop: `LDG`, `STS`, barrier, compute, barrier. Nothing can overlap the global-load latency.
-> - The cost table: 4096 cycles of FMA work per `k` tile on the T4 (2 CTAs per SM), 2048 on the H100, against several hundred cycles of `LDG` latency. **Replace the assumed 500 cycles with a measured value** (Jia et al. report about 296 cycles for an L2 miss on the T4, and 616 on a first access that also misses the TLB).
-> - The double-buffered loop: `LDG` tile `t+1` into staging registers, compute tile `t`, `STS` into the other buffer, one barrier. Explain why one barrier is enough.
-> - Costs: 16 KB of shared memory per CTA instead of 8 KB, and 8 staging registers per thread.
-> - Measure: `long_scoreboard` stalls should drop sharply from `vectorized` to `dbuf` (`profile.py stalls`).
-> - Aside: `cp.async` (Ampere+) and TMA (Hopper) remove the staging registers. The T4 has neither.
+### SMEM Double Buffering
 
 
 ## Scheduling CTAs Across the GPU
